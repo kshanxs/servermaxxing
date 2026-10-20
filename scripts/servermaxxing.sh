@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -a, --agent <claude|codex|herdr|tuios>  Auto-install and drop into agent session"
             echo "  -k, --tailscale-key, --tailscale-authkey <key> Join Tailscale mesh network unattended"
             echo "  --no-tailscale-ssh                      Disable Tailscale SSH flag (--ssh is enabled by default)"
+            echo "  GH_TOKEN=<token> (env)                  Log target user into GitHub unattended (also reads GITHUB_TOKEN)"
             echo "  -h, --help                              Show this help message"
             exit 0
             ;;
@@ -160,6 +161,8 @@ apt-get install -y --no-install-recommends \
     tree \
     tmux \
     jq \
+    git \
+    openssh-client \
     btop \
     htop \
     fastfetch \
@@ -338,6 +341,100 @@ else
     echo "  sudo tailscale up ${TS_UP_FLAGS}"
 fi
 
+# GitHub git auth for target user: detect whichever of HTTPS (gh) / SSH works so clone/push never prompt
+echo "Configuring GitHub git authentication for ${TARGET_USER}..."
+GIT_AUTH_STATE="Not configured"
+GH_LOGIN_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+
+as_target() { su - "$TARGET_USER" -c "$1"; }
+
+if ! command -v gh >/dev/null 2>&1; then
+    echo "Installing GitHub CLI (gh)..."
+    if ! apt-get install -y gh; then
+        # Fallback: official GitHub CLI apt repo (distros without gh in their archive)
+        mkdir -p -m 755 /etc/apt/keyrings
+        if curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; then
+            chmod 644 /etc/apt/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+            apt-get update -y && apt-get install -y gh || echo "Warning: gh installation failed. Continuing..."
+        else
+            echo "Warning: gh installation failed. Continuing..."
+        fi
+    fi
+fi
+
+if id "$TARGET_USER" &>/dev/null && command -v git >/dev/null 2>&1; then
+    TARGET_GROUP="$(id -gn "$TARGET_USER")"
+    SSH_DIR="${TARGET_HOME}/.ssh"
+    install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$SSH_DIR"
+
+    # Pin github.com host keys from GitHub's API (fetched over TLS) so SSH never asks to trust the host
+    if ! ssh-keygen -F github.com -f "${SSH_DIR}/known_hosts" >/dev/null 2>&1; then
+        GH_HOST_KEYS="$(curl -fsSL https://api.github.com/meta 2>/dev/null | jq -r '.ssh_keys[]? | "github.com " + .' 2>/dev/null || true)"
+        if [ -n "$GH_HOST_KEYS" ]; then
+            printf '%s\n' "$GH_HOST_KEYS" >> "${SSH_DIR}/known_hosts"
+            chown "${TARGET_USER}:${TARGET_GROUP}" "${SSH_DIR}/known_hosts"
+            chmod 644 "${SSH_DIR}/known_hosts"
+        fi
+    fi
+
+    GH_LOGGED_IN=false
+    if command -v gh >/dev/null 2>&1; then
+        # Optional unattended login: sudo GH_TOKEN=<token> bash servermaxxing.sh (token read from stdin, never echoed)
+        if [ -n "$GH_LOGIN_TOKEN" ] && ! as_target 'gh auth status --hostname github.com' >/dev/null 2>&1; then
+            echo "Logging ${TARGET_USER} into GitHub with provided token..."
+            printf '%s' "$GH_LOGIN_TOKEN" | as_target 'gh auth login --hostname github.com --with-token' || echo "Warning: gh token login failed. Continuing..."
+        fi
+        if as_target 'gh auth status --hostname github.com' >/dev/null 2>&1; then
+            GH_LOGGED_IN=true
+        fi
+    fi
+
+    # GitHub answers a working key with "successfully authenticated" (exit code 1, no shell access)
+    SSH_OUT="$(as_target 'ssh -T -o BatchMode=yes -o ConnectTimeout=10 git@github.com' 2>&1 || true)"
+    SSH_OK=false
+    if [[ "$SSH_OUT" == *"successfully authenticated"* ]]; then
+        SSH_OK=true
+    fi
+
+    if [ "$GH_LOGGED_IN" = true ]; then
+        # Preferred: HTTPS via gh credential helper; drop any SSH rewrite left by an earlier run
+        as_target 'gh auth setup-git --hostname github.com' || true
+        as_target 'git config --global --unset-all url.git@github.com:.insteadof "^https://github.com/$"' 2>/dev/null || true
+        GIT_AUTH_STATE="HTTPS via gh credential helper$([ "$SSH_OK" = true ] && echo ', SSH also OK')"
+    elif [ "$SSH_OK" = true ]; then
+        # No gh login but SSH key works: transparently route https://github.com/ URLs over SSH
+        as_target 'git config --global --replace-all url.git@github.com:.insteadof https://github.com/ "^https://github.com/$"'
+        GIT_AUTH_STATE="SSH (https://github.com/ URLs rewritten to SSH)"
+    else
+        # Neither works yet: leave a key ready so the user only has to add it to GitHub
+        if [ ! -f "${SSH_DIR}/id_ed25519" ]; then
+            as_target 'ssh-keygen -q -t ed25519 -N "" -C "$(whoami)@$(hostname)" -f ~/.ssh/id_ed25519'
+        fi
+        GIT_AUTH_STATE="Not authenticated (run: gh auth login && gh auth setup-git, or add ~/.ssh/id_ed25519.pub at https://github.com/settings/keys)"
+        echo "Notice: GitHub git auth is not set up for ${TARGET_USER}. Either:"
+        echo "  1. Run as ${TARGET_USER}: gh auth login && gh auth setup-git   (or re-run with GH_TOKEN=<token>)"
+        echo "  2. Add this SSH key at https://github.com/settings/keys, then re-run this script:"
+        echo "     $(cat "${SSH_DIR}/id_ed25519.pub" 2>/dev/null)"
+    fi
+
+    # Fill in git identity from the GitHub account when unset (never overrides an existing identity)
+    if [ "$GH_LOGGED_IN" = true ]; then
+        if [ -z "$(as_target 'git config --global user.name' 2>/dev/null || true)" ]; then
+            GH_NAME="$(as_target 'gh api user --jq ".name // .login"' 2>/dev/null || true)"
+            if [ -n "$GH_NAME" ]; then
+                as_target "git config --global user.name $(printf '%q' "$GH_NAME")"
+            fi
+        fi
+        if [ -z "$(as_target 'git config --global user.email' 2>/dev/null || true)" ]; then
+            GH_EMAIL="$(as_target "gh api user --jq '(.id|tostring) + \"+\" + .login + \"@users.noreply.github.com\"'" 2>/dev/null || true)"
+            if [ -n "$GH_EMAIL" ]; then
+                as_target "git config --global user.email $(printf '%q' "$GH_EMAIL")"
+            fi
+        fi
+    fi
+fi
+
 # 7. Ensure passwordless sudo is configured for non-interactive agent execution
 echo "[7/7] Ensuring passwordless sudo is configured for $TARGET_USER..."
 cat << EOF > "/etc/sudoers.d/${TARGET_USER}"
@@ -354,6 +451,7 @@ echo " Environment: $( [ "$IS_LAPTOP" = true ] && echo 'Laptop Server (24/7 Neve
 echo " Target user: ${TARGET_USER}"
 echo " Docker:      $(command -v docker >/dev/null && echo 'Ready' || echo 'Missing')"
 echo " Tailscale:   $(command -v tailscale >/dev/null && echo "Ready (IP: ${TS_IP}, SSH: ${TS_SSH_STATE}, Operator: ${TARGET_USER})" || echo 'Missing')"
+echo " GitHub git:  ${GIT_AUTH_STATE}"
 echo " uv / uvx:    $(command -v uv >/dev/null && echo 'Ready' || echo 'Missing')"
 echo " Vite+ (vp):  $(command -v vp >/dev/null && echo 'Ready' || echo 'Missing')"
 echo " Claude Code: $(command -v claude >/dev/null && echo 'Ready' || echo 'Not installed')"
@@ -361,29 +459,29 @@ echo " Codex CLI:   $(command -v codex >/dev/null && echo 'Ready' || echo 'Not i
 echo " Herdr / TUI: $(command -v herdr >/dev/null && echo 'Ready' || echo 'Missing')"
 echo "======================================================"
 
+# Seed servermaxxing skill into target user's workspace (always, so any agent opened later can audit/fix the box)
+mkdir -p "${TARGET_HOME}/.agents/skills/servermaxxing"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/../.agents/skills/servermaxxing/SKILL.md" ]; then
+    cp -f "${SCRIPT_DIR}/../.agents/skills/servermaxxing/SKILL.md" "${TARGET_HOME}/.agents/skills/servermaxxing/SKILL.md" 2>/dev/null || true
+elif [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/.agents/skills/servermaxxing/SKILL.md" ]; then
+    cp -f "${SCRIPT_DIR}/.agents/skills/servermaxxing/SKILL.md" "${TARGET_HOME}/.agents/skills/servermaxxing/SKILL.md" 2>/dev/null || true
+else
+    curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/.agents/skills/servermaxxing/SKILL.md -o "${TARGET_HOME}/.agents/skills/servermaxxing/SKILL.md" 2>/dev/null || true
+fi
+chown -R "${TARGET_USER}:$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")" "${TARGET_HOME}/.agents" 2>/dev/null || true
+
 # 8. Automated Agent Auto-Launch (if requested via --agent / AGENT)
 if [ "$AGENT_CHOICE" != "none" ]; then
-    # Seed servermaxxing skill context into target user's workspace
-    mkdir -p "${TARGET_HOME}/.agents/skills/servermaxxing"
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
-    if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/../.agents/skills/servermaxxing/SKILL.md" ]; then
-        cp -f "${SCRIPT_DIR}/../.agents/skills/servermaxxing/SKILL.md" "${TARGET_HOME}/.agents/skills/servermaxxing/SKILL.md" 2>/dev/null || true
-    elif [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/.agents/skills/servermaxxing/SKILL.md" ]; then
-        cp -f "${SCRIPT_DIR}/.agents/skills/servermaxxing/SKILL.md" "${TARGET_HOME}/.agents/skills/servermaxxing/SKILL.md" 2>/dev/null || true
-    else
-        curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/.agents/skills/servermaxxing/SKILL.md -o "${TARGET_HOME}/.agents/skills/servermaxxing/SKILL.md" 2>/dev/null || true
-    fi
-    chown -R "${TARGET_USER}:${TARGET_USER}" "${TARGET_HOME}/.agents" 2>/dev/null || true
-
     if [ -t 0 ] || [ -c /dev/stdin ]; then
         echo ""
         echo ">>> Launching agent '${AGENT_CHOICE}' as user '${TARGET_USER}'..."
         case "$AGENT_CHOICE" in
             claude)
-                exec su - "${TARGET_USER}" -c 'cd ~ && claude "Review and audit this machine against servermaxxing standards. Check sleep masking, battery caps, ZRAM swap, Docker, and Tailscale."'
+                exec su - "${TARGET_USER}" -c 'cd ~ && claude "Review and audit this machine against servermaxxing standards. Check sleep masking, battery caps, ZRAM swap, Docker, Tailscale, and GitHub git auth."'
                 ;;
             codex)
-                exec su - "${TARGET_USER}" -c 'cd ~ && codex "Review and audit this machine against servermaxxing standards. Check sleep masking, battery caps, ZRAM swap, Docker, and Tailscale."'
+                exec su - "${TARGET_USER}" -c 'cd ~ && codex "Review and audit this machine against servermaxxing standards. Check sleep masking, battery caps, ZRAM swap, Docker, Tailscale, and GitHub git auth."'
                 ;;
             herdr)
                 exec su - "${TARGET_USER}" -c 'herdr'

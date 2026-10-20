@@ -100,6 +100,17 @@ su - dev -c "curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/
 > - **Kernel Packet Forwarding**: Pre-configures `net.ipv4.ip_forward=1` for subnet routing or exit node use.
 > - Pass `--no-tailscale-ssh` if you prefer to manage host SSH independently.
 
+> [!TIP]
+> **Zero-Touch GitHub Git Auth:** The script configures `git clone`/`git push` to GitHub without prompts for the agent user. It picks whichever method works:
+> - `gh` is logged in, or you pass `GH_TOKEN`: HTTPS via the `gh` credential helper (`gh auth setup-git`).
+> - Otherwise, an SSH key that GitHub accepts: `https://github.com/` URLs are rewritten to SSH.
+> - Neither: an `~/.ssh/id_ed25519` key is generated and printed so you can add it to GitHub, then re-run.
+>
+> It also pins github.com's SSH host keys. When `gh` is logged in, it fills in a missing git name/email from your GitHub account.
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/scripts/servermaxxing.sh -o /tmp/servermaxxing.sh && sudo GH_TOKEN="<github token>" bash /tmp/servermaxxing.sh
+> ```
+
 ---
 
 ## 🛠️ The Stack: What Gets Maxxed
@@ -128,7 +139,7 @@ su - dev -c "curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/
 | **Fast Runtimes** | **`uv` / `uvx`** & **`Vite+` (`vp`)** | Instantly executes Python scripts and virtual environments at 10x-100x pip speeds. Fast Node/Bun management without version managers breaking. |
 | **CLI Speed Pack** | `ripgrep`, `fd-find`, `fzf`, `superfile`, `btop`, `fastfetch`, `speedtest` | High-efficiency terminal tools. Gives agents sub-millisecond code exploration commands so they don't burn tokens on slow bash pipelines. |
 | **Access & Security** | `tailscale`, rootless `docker`, scoped `sudoers` | Connect from your MacBook, phone, or desktop with 0 open firewall ports. Agent executes Docker and system tasks without authentication deadlocks. |
-
+| **Git & GitHub** | `git`, `gh` | Clone/push to GitHub with no prompts. HTTPS via `gh` or SSH is detected and configured automatically. |
 ---
 
 ## 🏗️ System Architecture
@@ -167,6 +178,7 @@ Looking to build a homelab cluster or optimize a specific virtualization stack? 
 - 📖 **[Ubuntu Server Setup Guide](docs/setup.md)** — Complete step-by-step walkthrough covering manual setups, Wi-Fi powersave tweaks, and tool configurations.
 - 🖥️ **[Proxmox VE Setup Guide](docs/proxmox.md)** — Optimized LXC containers with Docker nesting and Tailscale TUN pass-through, plus GPU passthrough for local models.
 - 🌐 **[Multi-Node LAN Deployment](docs/multi-node-deployment.md)** — Decouple heavy agent compute from production database nodes across local gigabit LAN.
+- 🧰 **[Tool Guide: Which Tool for Which Job](docs/tools.md)** — "I want to…" lookup table, tools grouped by job, and common workflows.
 
 ---
 

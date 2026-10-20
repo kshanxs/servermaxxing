@@ -252,9 +252,18 @@ sudo mkdir -p -m 755 /etc/apt/sources.list.d
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
 sudo apt update && sudo apt install -y gh
 
-# Authenticate with GitHub
+# Authenticate with GitHub, then let git use gh for HTTPS credentials
 gh auth login
+gh auth setup-git
 ```
+
+Verify git can reach GitHub without prompting (either one succeeding is enough):
+```bash
+GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/<owner>/<private-repo>.git HEAD
+ssh -T git@github.com   # "successfully authenticated" means SSH works
+```
+
+> **Note:** Without `gh auth setup-git`, HTTPS clones fail with `could not read Username for 'https://github.com': terminal prompts disabled`, even when `gh` itself is logged in.
 
 ---
 
