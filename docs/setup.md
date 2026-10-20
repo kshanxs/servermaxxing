@@ -169,13 +169,22 @@ sudo systemctl restart zramswap.service
 Install Tailscale to enable zero-config, encrypted mesh access from your laptop, tablet, or phone without exposing ports to the public internet:
 
 ```bash
-# Install Tailscale
+# 1. Enable IP forwarding for subnet routing & exit nodes
+echo "net.ipv4.ip_forward = 1" | sudo tee /etc/sysctl.d/99-tailscale.conf
+echo "net.ipv6.conf.all.forwarding = 1" | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
+
+# 2. Install Tailscale
 curl -fsSL https://tailscale.com/install.sh | sh
+sudo systemctl enable --now tailscaled
 
-# Authenticate and connect
-sudo tailscale up
+# 3. Authenticate and connect with Tailscale SSH & non-root operator enabled
+sudo tailscale up --ssh --operator="$USER"
 
-# Note your Tailscale IP
+# Or zero-touch headless join with an auth key:
+# sudo tailscale up --authkey="tskey-auth-..." --ssh --operator="$USER"
+
+# 4. Note your Tailscale IP
 tailscale ip -4
 ```
 

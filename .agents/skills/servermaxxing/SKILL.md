@@ -68,7 +68,7 @@ echo "4. Wi-Fi Power Save:" $(grep -s "wifi.powersave" /etc/NetworkManager/conf.
 echo "5. Battery Health Cap:" $(cat /sys/class/power_supply/BAT*/charge_control_end_threshold 2>/dev/null || echo 'No threshold set / Uncapped 100%')
 echo "6. ZRAM In-Memory Swap:" $(cat /proc/swaps | grep zram || echo 'MISSING: Slow disk swap active')
 echo "7. Docker:" $(docker --version 2>/dev/null || echo 'MISSING')
-echo "8. Tailscale:" $(tailscale status 2>/dev/null | head -n1 || echo 'MISSING')
+echo "8. Tailscale:" $(tailscale ip -4 2>/dev/null || echo 'OFFLINE / NOT RUNNING')
 echo "9. uv / uvx:" $(uv --version 2>/dev/null || echo 'MISSING')
 echo "10. Vite+ (vp):" $(vp --version 2>/dev/null || echo 'MISSING')
 echo "11. Agent Multiplexers:" $(which herdr tuios tmux 2>/dev/null || echo 'MISSING')
@@ -80,5 +80,6 @@ echo "11. Agent Multiplexers:" $(which herdr tuios tmux 2>/dev/null || echo 'MIS
    - Call out unmasked sleep targets (if someone closes the lid, the agent dies mid-task).
    - Call out uncapped battery charging (baking the battery at 100% 24/7).
    - Call out Wi-Fi power saving enabled (dropping SSH sessions).
+   - Call out Tailscale missing or unauthenticated (requiring open public SSH ports).
 2. **The Fixes**:
    - Provide the exact, hardened commands or recommend running `sudo bash servermaxxing.sh`.

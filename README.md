@@ -86,10 +86,19 @@ su - dev -c "curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/
 ```
 
 > [!TIP]
-> **Zero-Touch Tailscale Auth:** Pass your pre-auth key to join your private mesh silently without manual web verification:
+> **Zero-Touch Tailscale Mesh + SSH:** Pass your pre-auth key via CLI flag or env var to join your private mesh with Tailscale SSH and non-root operator privileges enabled automatically:
 > ```bash
+> # Using CLI flag
+> curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/scripts/servermaxxing.sh -o /tmp/servermaxxing.sh && sudo bash /tmp/servermaxxing.sh --tailscale-key "tskey-auth-..."
+>
+> # Or using environment variable:
 > curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/scripts/servermaxxing.sh -o /tmp/servermaxxing.sh && sudo TAILSCALE_AUTHKEY="tskey-auth-..." bash /tmp/servermaxxing.sh
 > ```
+> *Features auto-configured:*
+> - **Tailscale SSH (`--ssh`)**: Keyless, encrypted SSH straight from your mesh without opening port 22.
+> - **Non-Root Operator (`--operator`)**: Allows the non-root agent user to run `tailscale status`, `tailscale serve`, and `tailscale funnel` without `sudo`.
+> - **Kernel Packet Forwarding**: Pre-configures `net.ipv4.ip_forward=1` for subnet routing or exit node use.
+> - Pass `--no-tailscale-ssh` if you prefer to manage host SSH independently.
 
 ---
 

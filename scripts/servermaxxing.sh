@@ -12,6 +12,9 @@ TARGET_HOME="$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6 || eval ec
 echo "Target user: ${TARGET_USER} (Home: ${TARGET_HOME})"
 
 AGENT_CHOICE="${AGENT:-none}"
+TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
+TAILSCALE_SSH=true
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --agent|-a)
@@ -22,6 +25,28 @@ while [[ $# -gt 0 ]]; do
             AGENT_CHOICE="${1#*=}"
             shift
             ;;
+        --tailscale-authkey|--tailscale-key|-k)
+            TAILSCALE_AUTHKEY="${2:-}"
+            shift 2 2>/dev/null || shift 1
+            ;;
+        --tailscale-authkey=*|--tailscale-key=*)
+            TAILSCALE_AUTHKEY="${1#*=}"
+            shift
+            ;;
+        --no-tailscale-ssh)
+            TAILSCALE_SSH=false
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: sudo bash servermaxxing.sh [options]"
+            echo ""
+            echo "Options:"
+            echo "  -a, --agent <claude|codex|herdr|tuios>  Auto-install and drop into agent session"
+            echo "  -k, --tailscale-key, --tailscale-authkey <key> Join Tailscale mesh network unattended"
+            echo "  --no-tailscale-ssh                      Disable Tailscale SSH flag (--ssh is enabled by default)"
+            echo "  -h, --help                              Show this help message"
+            exit 0
+            ;;
         *)
             shift
             ;;
@@ -30,6 +55,9 @@ done
 
 if [ "$AGENT_CHOICE" != "none" ]; then
     echo "Selected Agent Auto-Launch: ${AGENT_CHOICE}"
+fi
+if [ -n "$TAILSCALE_AUTHKEY" ]; then
+    echo "Tailscale Auth Key provided via CLI/environment."
 fi
 
 # 0. Dynamic Hardware & Virtualization Environment Detection
@@ -250,6 +278,14 @@ if id "$TARGET_USER" &>/dev/null; then
 fi
 
 # Tailscale Mesh VPN
+echo "Configuring Tailscale kernel network optimizations..."
+mkdir -p /etc/sysctl.d
+cat << 'EOF' > /etc/sysctl.d/99-tailscale.conf
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+EOF
+sysctl -p /etc/sysctl.d/99-tailscale.conf 2>/dev/null || true
+
 if ! command -v tailscale >/dev/null 2>&1; then
     echo "Installing Tailscale Mesh VPN..."
     if curl -fsSL https://tailscale.com/install.sh | sh; then
@@ -260,11 +296,20 @@ if ! command -v tailscale >/dev/null 2>&1; then
     fi
 fi
 
+TS_UP_FLAGS="--operator=${TARGET_USER}"
+if [ "$TAILSCALE_SSH" = true ]; then
+    TS_UP_FLAGS="${TS_UP_FLAGS} --ssh"
+fi
+
 if [ -n "${TAILSCALE_AUTHKEY:-}" ] && command -v tailscale >/dev/null 2>&1; then
-    echo "Authenticating Tailscale with provided auth key..."
-    tailscale up --authkey="${TAILSCALE_AUTHKEY}" || true
+    echo "Authenticating Tailscale with provided auth key (flags: ${TS_UP_FLAGS})..."
+    tailscale up --authkey="${TAILSCALE_AUTHKEY}" ${TS_UP_FLAGS} || true
+    echo "Tailscale connected. Node IP: $(tailscale ip -4 2>/dev/null || echo 'authenticating')"
 else
-    echo "Tailscale is ready. To connect node: sudo tailscale up"
+    # Set operator permissions if tailscaled is active so target user can control Tailscale without sudo
+    tailscale set --operator="${TARGET_USER}" 2>/dev/null || true
+    echo "Tailscale is ready. To connect node with SSH & operator enabled:"
+    echo "  sudo tailscale up ${TS_UP_FLAGS}"
 fi
 
 # 7. Ensure passwordless sudo is configured for non-interactive agent execution
@@ -274,12 +319,15 @@ ${TARGET_USER} ALL=(ALL) NOPASSWD:ALL
 EOF
 chmod 0440 "/etc/sudoers.d/${TARGET_USER}"
 
+TS_IP="$(tailscale ip -4 2>/dev/null || echo 'Not connected')"
+TS_SSH_STATE="$([ "$TAILSCALE_SSH" = true ] && echo 'Enabled (--ssh)' || echo 'Disabled')"
+
 echo "======================================================"
 echo " Server tuning complete! "
 echo " Environment: $( [ "$IS_LAPTOP" = true ] && echo 'Laptop Server (24/7 Never-Sleep Enabled)' || ([ "$IS_VM" = true ] && echo "Virtual Machine / VPS (${VIRT_TYPE})" || echo 'Bare-Metal Dedicated Server') )"
 echo " Target user: ${TARGET_USER}"
 echo " Docker:      $(command -v docker >/dev/null && echo 'Ready' || echo 'Missing')"
-echo " Tailscale:   $(command -v tailscale >/dev/null && echo 'Ready' || echo 'Missing')"
+echo " Tailscale:   $(command -v tailscale >/dev/null && echo "Ready (IP: ${TS_IP}, SSH: ${TS_SSH_STATE}, Operator: ${TARGET_USER})" || echo 'Missing')"
 echo " uv / uvx:    $(command -v uv >/dev/null && echo 'Ready' || echo 'Missing')"
 echo " Vite+ (vp):  $(command -v vp >/dev/null && echo 'Ready' || echo 'Missing')"
 echo " Claude Code: $(command -v claude >/dev/null && echo 'Ready' || echo 'Not installed')"
