@@ -374,10 +374,12 @@ if ! command -v tuios >/dev/null; then
     bash -c "$(curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/tuios/main/install.sh)" || true
 fi
 
-# Install official Ookla speedtest CLI
+# Install official Ookla speedtest CLI (direct binary avoids Ubuntu 24.04+ Packagecloud 404 bugs)
 if ! command -v speedtest >/dev/null; then
-    curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
-    sudo apt-get install -y speedtest
+    ARCH="$(uname -m)"
+    [ "$ARCH" = "x86_64" ] && OOKLA_ARCH="x86_64" || OOKLA_ARCH="aarch64"
+    curl -fsSL "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${OOKLA_ARCH}.tgz" | sudo tar -xzf - -C /usr/local/bin speedtest
+    sudo chmod +x /usr/local/bin/speedtest
 fi
 ```
 

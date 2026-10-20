@@ -203,10 +203,36 @@ fi
 # Install official Ookla Speedtest CLI if not present
 if ! command -v speedtest >/dev/null; then
     echo "Installing official Ookla speedtest CLI..."
-    if curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash; then
-        apt-get install -y speedtest || true
-    else
-        echo "Warning: Ookla speedtest repository setup failed. Continuing..."
+    # Clean up broken packagecloud apt lists (which break on Ubuntu 24.04+ due to missing noble release)
+    rm -f /etc/apt/sources.list.d/ookla_speedtest-cli.list 2>/dev/null || true
+
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64|amd64)
+            OOKLA_ARCH="x86_64"
+            ;;
+        aarch64|arm64)
+            OOKLA_ARCH="aarch64"
+            ;;
+        armv7l|armhf)
+            OOKLA_ARCH="armhf"
+            ;;
+        *)
+            OOKLA_ARCH=""
+            ;;
+    esac
+
+    if [ -n "$OOKLA_ARCH" ]; then
+        TMP_SPEEDTEST="$(mktemp -d /tmp/ookla-speedtest.XXXXXX)"
+        if curl -fsSL "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${OOKLA_ARCH}.tgz" -o "${TMP_SPEEDTEST}/speedtest.tgz"; then
+            tar -xzf "${TMP_SPEEDTEST}/speedtest.tgz" -C "${TMP_SPEEDTEST}"
+            install -m 755 "${TMP_SPEEDTEST}/speedtest" /usr/local/bin/speedtest
+            rm -rf "${TMP_SPEEDTEST}"
+            echo "Installed official Ookla speedtest binary to /usr/local/bin/speedtest."
+        else
+            echo "Warning: Failed to download Ookla speedtest binary. Continuing..."
+            rm -rf "${TMP_SPEEDTEST}"
+        fi
     fi
 fi
 
