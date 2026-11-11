@@ -1,6 +1,111 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ------------------------------------------------------------------
+# Read-only audit: `bash servermaxxing.sh --audit [--json]`
+# Runs as any user, needs no root, changes nothing. One line (or JSON object) per check with a
+# status of ok, warn, fail or n/a, so people, agents and fleet tools can all read it.
+# ------------------------------------------------------------------
+if [[ " $* " == *" --audit "* ]]; then
+    AUDIT_JSON=false
+    [[ " $* " == *" --json "* ]] && AUDIT_JSON=true
+    AUDIT_ROWS=()
+    check() { AUDIT_ROWS+=("$1"$'\t'"$2"$'\t'"$3"); }
+    have() { command -v "$1" >/dev/null 2>&1; }
+
+    VIRT="$(systemd-detect-virt 2>/dev/null || true)"; VIRT="${VIRT:-none}"
+    LAPTOP=false
+    CHASSIS="$(tr -d '[:space:]' < /sys/class/dmi/id/chassis_type 2>/dev/null || true)"
+    if [ "$VIRT" = none ] && { compgen -G "/sys/class/power_supply/BAT*" >/dev/null || [[ "$CHASSIS" =~ ^(8|9|10|11|14|30|31|32)$ ]]; }; then
+        LAPTOP=true
+    fi
+    KIND="$([ "$VIRT" != none ] && echo "vm:$VIRT" || ([ "$LAPTOP" = true ] && echo laptop || echo bare-metal))"
+    check host ok "$KIND, $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown OS}"), $(uname -m)"
+
+    if [ "$VIRT" != none ]; then
+        check sleep n/a "virtual machine"
+    else
+        SLEEP="$(systemctl is-enabled sleep.target 2>/dev/null || true)"
+        if [ "$SLEEP" = masked ]; then check sleep ok "sleep targets masked"
+        elif [ "$LAPTOP" = true ]; then check sleep fail "sleep.target is ${SLEEP:-unknown}: the laptop can suspend mid-task"
+        else check sleep warn "sleep.target is ${SLEEP:-unknown}, not masked: an idle or power-key suspend stops agents"; fi
+    fi
+    if [ "$LAPTOP" = true ]; then
+        LID="$(systemd-analyze cat-config systemd/logind.conf 2>/dev/null | grep -E '^HandleLidSwitch=' | tail -1 || true)"
+        if [ "$LID" = "HandleLidSwitch=ignore" ]; then check lid ok "lid close ignored"
+        elif [ "$SLEEP" = masked ]; then check lid warn "lid close still asks to suspend (blocked only because sleep is masked)"
+        else check lid fail "closing the lid suspends the machine"; fi
+        if [ -d /etc/NetworkManager ]; then
+            grep -qs "wifi.powersave *= *2" /etc/NetworkManager/conf.d/*.conf \
+                && check wifi_powersave ok "disabled" || check wifi_powersave warn "Wi-Fi power save may drop SSH"
+        fi
+        CAP="$(cat /sys/class/power_supply/BAT*/charge_control_end_threshold 2>/dev/null | head -1 || true)"
+        if [ -z "$CAP" ]; then check battery_cap warn "no charge threshold control"
+        elif [ "$CAP" -le 85 ]; then check battery_cap ok "${CAP}%"
+        else check battery_cap fail "charges to ${CAP}% on constant AC"; fi
+    fi
+
+    grep -q zram /proc/swaps 2>/dev/null && check zram ok "$(awk '/zram/{printf "%d MiB", $3/1024}' /proc/swaps)" \
+        || check zram warn "no zram swap: heavy builds swap to disk"
+    MEM_MB="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+    check memory "$([ "$MEM_MB" -ge 3800 ] && echo ok || echo warn)" "${MEM_MB} MiB"
+    DISK_PCT="$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}' || true)"
+    DISK_PCT="${DISK_PCT:-0}"
+    check disk "$([ "$DISK_PCT" -lt 85 ] && echo ok || ([ "$DISK_PCT" -lt 95 ] && echo warn || echo fail))" "/ is ${DISK_PCT}% full"
+
+    sudo -n true 2>/dev/null && check sudo ok "passwordless" || check sudo warn "sudo asks for a password: agents cannot use it"
+    if have docker; then
+        docker info >/dev/null 2>&1 && check docker ok "$(docker --version 2>/dev/null | cut -d, -f1)" \
+            || check docker warn "installed, but $(id -un) cannot reach the daemon (docker group?)"
+    else check docker fail "missing"; fi
+    TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+    TS_IF="$(ip -4 -br addr show tailscale0 2>/dev/null | awk '{print $3}' | cut -d/ -f1 || true)"
+    if [ -n "$TS_IP" ]; then check tailscale ok "$TS_IP"
+    elif [ -n "$TS_IF" ]; then check tailscale ok "$TS_IF (tailscale0 up; CLI not on PATH, e.g. running in a container)"
+    elif have tailscale; then check tailscale fail "installed, not connected"
+    else check tailscale fail "missing"; fi
+    for t in git uv node vp tmux rg jq; do
+        have "$t" && check "$t" ok "$({ "$t" --version 2>/dev/null || "$t" -V 2>/dev/null; } | head -1 | cut -c1-60)" \
+            || check "$t" "$([ "$t" = git ] && echo fail || echo warn)" "missing"
+    done
+    for t in claude codex; do
+        have "$t" && check "$t" ok "installed" || check "$t" n/a "not installed"
+    done
+
+    if have gh && gh auth status --hostname github.com >/dev/null 2>&1; then check gh_login ok "logged in"
+    else check gh_login warn "gh not logged in"; fi
+    git config --get-regexp '^credential' 2>/dev/null | grep -q gh && HTTPS_OK=true || HTTPS_OK=false
+    SSH_OUT="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 git@github.com 2>&1 || true)"
+    [[ "$SSH_OUT" == *"successfully authenticated"* ]] && SSH_OK=true || SSH_OK=false
+    if [ "$HTTPS_OK" = true ] || [ "$SSH_OK" = true ]; then
+        check github_git ok "$([ "$HTTPS_OK" = true ] && echo 'HTTPS via gh')$([ "$HTTPS_OK" = true ] && [ "$SSH_OK" = true ] && echo ', ')$([ "$SSH_OK" = true ] && echo 'SSH')"
+    else
+        check github_git fail "neither HTTPS (gh credential helper) nor SSH works: clone/push will prompt"
+    fi
+    GN="$(git config --global user.name 2>/dev/null || true)"; GE="$(git config --global user.email 2>/dev/null || true)"
+    [ -n "$GN" ] && [ -n "$GE" ] && check git_identity ok "set" || check git_identity warn "user.name or user.email missing"
+
+    if [ "$AUDIT_JSON" = true ]; then
+        esc() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//$'\t'/ }"; }
+        printf '['
+        sep=""
+        for row in "${AUDIT_ROWS[@]}"; do
+            IFS=$'\t' read -r k st d <<< "$row"
+            printf '%s{"check":"%s","status":"%s","detail":"%s"}' "$sep" "$(esc "$k")" "$(esc "$st")" "$(esc "$d")"
+            sep=","
+        done
+        printf ']\n'
+    else
+        echo "servermaxxing audit: $(hostname) as $(id -un)"
+        for row in "${AUDIT_ROWS[@]}"; do
+            IFS=$'\t' read -r k st d <<< "$row"
+            printf '  %-15s %-5s %s\n' "$k" "$st" "$d"
+        done
+        echo "Fix: sudo bash servermaxxing.sh (idempotent), or follow the skill's modes."
+    fi
+    exit 0
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 
 echo "======================================================"
@@ -14,6 +119,7 @@ echo "Target user: ${TARGET_USER} (Home: ${TARGET_HOME})"
 AGENT_CHOICE="${AGENT:-none}"
 TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
 TAILSCALE_SSH=true
+POST_HOOK="${SERVERMAXXING_POST_HOOK:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +139,14 @@ while [[ $# -gt 0 ]]; do
             TAILSCALE_AUTHKEY="${1#*=}"
             shift
             ;;
+        --post-hook)
+            POST_HOOK="${2:-}"
+            shift 2 2>/dev/null || shift 1
+            ;;
+        --post-hook=*)
+            POST_HOOK="${1#*=}"
+            shift
+            ;;
         --no-tailscale-ssh)
             TAILSCALE_SSH=false
             shift
@@ -44,6 +158,9 @@ while [[ $# -gt 0 ]]; do
             echo "  -a, --agent <claude|codex|herdr|tuios>  Auto-install and drop into agent session"
             echo "  -k, --tailscale-key, --tailscale-authkey <key> Join Tailscale mesh network unattended"
             echo "  --no-tailscale-ssh                      Disable Tailscale SSH flag (--ssh is enabled by default)"
+            echo "  --post-hook <command>                   Run a command as the target user after provisioning"
+            echo "                                          (join a fleet, clone dotfiles...); also SERVERMAXXING_POST_HOOK"
+            echo "  --audit [--json]                        Read-only check of this machine, no root needed; changes nothing"
             echo "  GH_TOKEN=<token> (env)                  Log target user into GitHub unattended (also reads GITHUB_TOKEN)"
             echo "  -h, --help                              Show this help message"
             exit 0
@@ -470,6 +587,16 @@ else
     curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/.agents/skills/servermaxxing/SKILL.md -o "${TARGET_HOME}/.agents/skills/servermaxxing/SKILL.md" 2>/dev/null || true
 fi
 chown -R "${TARGET_USER}:$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")" "${TARGET_HOME}/.agents" 2>/dev/null || true
+
+# Post-provision hook: hand over to the caller's own setup (a fleet join, dotfiles, ...), as the target user
+if [ -n "$POST_HOOK" ]; then
+    echo ">>> Running post-provision hook as ${TARGET_USER}..."
+    if su - "$TARGET_USER" -c "$POST_HOOK"; then
+        echo "Post-provision hook finished."
+    else
+        echo "Warning: post-provision hook failed (exit $?). The machine is provisioned; re-run the hook by hand."
+    fi
+fi
 
 # 8. Automated Agent Auto-Launch (if requested via --agent / AGENT)
 if [ "$AGENT_CHOICE" != "none" ]; then
