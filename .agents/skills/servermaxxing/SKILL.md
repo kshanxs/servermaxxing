@@ -59,6 +59,7 @@ apt-get update -y && apt-get install -y curl && id -u dev &>/dev/null || (adduse
 The script is idempotent (safe to re-run) and automatically detects:
 * **Cloud VPS / VM / LXC**: Configures headless daemons, ZRAM, Docker, Tailscale, runtimes, and skips physical lid/battery policies.
 * **Bare-Metal Laptop**: Applies 24/7 never-sleep masking, ignores lid close across all states, disables Wi-Fi power save, and enforces the 80% battery longevity threshold.
+* **Any physical machine on Wi-Fi**: turns Wi-Fi power save off in every layer (NetworkManager, a networkd-dispatcher hook for netplan/systemd-networkd, and `iw` now), sets the Realtek rtw88 driver options against deep power save and ASPM when that driver is loaded (next boot), and installs `wifi-watchdog.timer`: every minute it forces power save off and, when the default gateway stops answering for 3 checks, reconnects (then restarts the WPA supplicant, then networking). `--no-wifi-watchdog` skips the watchdog.
 * **Bare-Metal Dedicated Server**: Masks sleep targets, disables ModemManager/multipathd bloat, and provisions the agent stack.
 * **Target user**: The invoking `sudo` user (not root) receives docker group, passwordless sudo, Tailscale operator rights, GitHub git auth, and this skill.
 * **GitHub git auth**: Pins github.com SSH host keys, then picks whichever method works:
@@ -110,7 +111,7 @@ echo "15. Git identity:" "$(git config --global user.name 2>/dev/null || echo 'M
    - Call out any missing ZRAM (SSD killer under agent builds).
    - Call out unmasked sleep targets (if someone closes the lid, the agent dies mid-task).
    - Call out uncapped battery charging (baking the battery at 100% 24/7).
-   - Call out Wi-Fi power saving enabled (dropping SSH sessions).
+   - Call out Wi-Fi power saving enabled (dropping SSH sessions): the audit reads the live state with `iw`, because a udev rule or config file alone is undone when the link reconnects. Call out a Wi-Fi box with no watchdog. For drops already happening, `journalctl -b | grep CTRL-EVENT-DISCONNECTED` counts them; `reason=4 locally_generated=1` (inactivity) is the power-save signature.
    - Call out Tailscale missing or unauthenticated (requiring open public SSH ports).
    - Call out GitHub auth where both items 13 and 14 fail (the agent's first `git push` dies on a username prompt).
 2. **The Fixes**:
