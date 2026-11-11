@@ -1,6 +1,6 @@
 ---
 name: servermaxxing
-description: Provision, optimize, or ruthlessly "toast" (audit/roast) any Linux server, VPS, laptop, or homelab box for autonomous AI coding agents. Use when the user asks to set up, tune, or audit a server, optimize a laptop server with the lid down, audit battery/power policies, fix git clone/push to GitHub failing on a server (e.g. "could not read Username for 'https://github.com'"), or roast a machine's readiness for AI agent workloads.
+description: Provision, optimize, or ruthlessly "toast" (audit/roast) any Linux server, VPS, laptop, or homelab box for autonomous AI coding agents. Use when the user asks to set up, tune, or audit a server, optimize a laptop server with the lid down, audit battery/power policies, fix git clone/push to GitHub failing on a server (e.g. "could not read Username for 'https://github.com'"), roast a machine's readiness for AI agent workloads, add a new machine to a fleet of agent servers, or migrate work and services from one machine to another.
 ---
 
 # `servermaxxing` : Agent Workstation Provisioner & Server Toast Engine
@@ -72,7 +72,19 @@ The script is idempotent (safe to re-run) and automatically detects:
 
 ### Mode B: The "Server Toast" Audit Routine (Roast & Fix)
 
-When a user asks you to "toast", audit, inspect, or critique their current machine or server setup, run these diagnostics **as the agent user** (not root) and deliver a sharp, skeptical critique:
+When a user asks you to "toast", audit, inspect, or critique their current machine or server setup, run the built-in audit **as the agent user** (not root). It is read-only and needs no sudo:
+
+```bash
+bash servermaxxing.sh --audit          # one line per check: ok, warn, fail or n/a, with the detail
+bash servermaxxing.sh --audit --json   # the same as a JSON array of {check, status, detail}
+# without a clone:
+curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/scripts/servermaxxing.sh -o /tmp/smx.sh && bash /tmp/smx.sh --audit
+```
+
+It checks the host kind, sleep masking, lid policy, Wi-Fi power save and battery cap (laptops),
+zram, memory, disk, passwordless sudo, Docker, Tailscale (CLI or a `tailscale0` interface, for
+Tailscale running in a container), the runtimes and tools, GitHub CLI login, git auth over HTTPS or
+SSH, and git identity. If the script is not at hand, the manual equivalent is:
 
 ```bash
 echo "=== SERVERMAXXING DIAGNOSTIC AUDIT ==="
@@ -107,6 +119,15 @@ echo "15. Git identity:" "$(git config --global user.name 2>/dev/null || echo 'M
 
 ---
 
+### Appliances: audit, never provision
+
+On an appliance OS (umbrelOS, TrueNAS, Unraid, Synology DSM, Home Assistant OS, a managed
+container host) run `--audit` only. Do not run the provisioner there: it removes snaps, masks
+services, installs packages and writes sudoers, which those systems manage themselves. Fix gaps the
+appliance's own way (its app store, its settings), and report the rest.
+
+---
+
 ### Tool Picking
 
 When a user asks which tool to use for a job, or you need one yourself, use the [Tool Guide](https://github.com/kshanxs/servermaxxing/blob/main/docs/tools.md). Prefer the fast tools: `rg` over `grep -r`, `fd` over `find`, `uv run`/`uvx` over `pip install`, and `tmux` for long-running agent sessions.
@@ -128,3 +149,55 @@ Use this when clone/push to github.com fails, e.g. `fatal: could not read Userna
    `git config --global url.git@github.com:.insteadOf https://github.com/`
 8. If it still fails, check `echo $HOME`. A different `HOME` (sandbox, service, or `sudo` without `-H`) does not see `~/.gitconfig` or `~/.config/gh`.
 9. Report which method works and give the exact clone command.
+
+---
+
+### Mode D: Add a Machine to a Fleet
+
+servermaxxing knows nothing about any particular fleet; it hands over through one hook:
+
+```bash
+sudo GH_TOKEN="<token>" TAILSCALE_AUTHKEY="tskey-auth-..." bash servermaxxing.sh \
+  --post-hook 'curl -fsSL https://example.com/join.sh | bash'      # or: git clone <dotfiles> && ./install
+```
+
+The hook runs as the target user after provisioning, once git auth and Tailscale work, so it can
+clone private repositories. It is also read from `SERVERMAXXING_POST_HOOK`. A failing hook leaves
+the machine provisioned and says so. Then run `--audit` and report what is still warn or fail.
+
+A fleet tool that drives servermaxxing should rely only on this contract: the provisioner is
+idempotent; `--audit --json` prints a JSON array of `{check, status, detail}` with status `ok`,
+`warn`, `fail` or `n/a` and exits 0; `--post-hook` runs once at the end. Check names may grow;
+ignore ones you do not know.
+
+---
+
+### Mode E: Migrate a Machine
+
+Use when work or services move from an old machine to a new one (new hardware, a VPS move, a
+reinstall). Never delete anything on the old machine until the new one is verified.
+
+1. **Inventory the old machine** (read-only), and write it down:
+   - Git checkouts with uncommitted changes, unpushed commits or stashes
+     (`git status --short`, `git log @{u}..`, `git stash list` in each). Push or copy them first.
+   - Services: `systemctl list-units --type=service --state=running`, `systemctl --user list-units`,
+     `crontab -l`, `systemctl list-timers`, `docker ps -a`, `docker compose ls`.
+   - Data: Docker volumes and bind mounts (`docker volume ls`, `docker inspect`), databases (dump
+     them, never copy live data files), and app data folders.
+   - Config and identity: dotfiles, `~/.ssh` (generate new keys on the new machine instead of copying,
+     unless the user says otherwise), `~/.config/gh` (log in again instead), agent configs
+     (`~/.claude`, `~/.codex`, `~/.agents`), and environment files. Never print secrets; move them
+     with `scp` or `rsync` over Tailscale, never through chat.
+   - What reaches the machine: DNS records, port forwards, Tailscale ACLs and tags, reverse proxy
+     routes, webhooks, cloud firewall rules.
+2. **Provision the new machine** (Mode A), then `--audit`.
+3. **Move**: clone repositories fresh from their remotes, restore dumps and volumes with
+   `rsync -aHAX --info=progress2` over Tailscale, recreate services and timers, and repoint DNS,
+   proxies and anything else from the inventory.
+4. **Verify on the new machine**: each service answers, each timer is scheduled, the data is
+   there (row counts or checksums), clone and push work, and `--audit` is clean.
+5. **Decommission** only after the user confirms: stop the old services, remove the old node from
+   Tailscale and any fleet lists, then wipe or repurpose it.
+
+Report the inventory, what moved, what was verified and how, and anything left on the old machine.
+

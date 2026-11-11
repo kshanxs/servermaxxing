@@ -113,6 +113,20 @@ su - dev -c "curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/
 
 ---
 
+### 4. Audit Any Machine (read-only, no root)
+```bash
+curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/scripts/servermaxxing.sh -o /tmp/smx.sh
+bash /tmp/smx.sh --audit          # ok / warn / fail per check
+bash /tmp/smx.sh --audit --json   # [{"check", "status", "detail"}] for scripts and fleet tools
+```
+Safe on appliances (umbrelOS, TrueNAS, Synology...) where you should audit but not provision.
+
+### 5. Hand Off to Your Own Setup (fleets, dotfiles)
+```bash
+sudo bash /tmp/servermaxxing.sh --post-hook 'git clone https://github.com/<you>/dotfiles ~/dotfiles && ~/dotfiles/install'
+```
+The hook runs as the target user after provisioning, once GitHub auth and Tailscale work (also `SERVERMAXXING_POST_HOOK`). The skill covers adding a machine to a fleet (Mode D) and migrating one machine to another (Mode E).
+
 ## 🛠️ The Stack: What Gets Maxxed
 
 ```
