@@ -35,16 +35,24 @@ if [[ " $* " == *" --audit "* ]]; then
         if [ "$LID" = "HandleLidSwitch=ignore" ]; then check lid ok "lid close ignored"
         elif [ "$SLEEP" = masked ]; then check lid warn "lid close still asks to suspend (blocked only because sleep is masked)"
         else check lid fail "closing the lid suspends the machine"; fi
-        if [ -d /etc/NetworkManager ]; then
-            grep -qs "wifi.powersave *= *2" /etc/NetworkManager/conf.d/*.conf \
-                && check wifi_powersave ok "disabled" || check wifi_powersave warn "Wi-Fi power save may drop SSH"
-        fi
         CAP="$(cat /sys/class/power_supply/BAT*/charge_control_end_threshold 2>/dev/null | head -1 || true)"
         if [ -z "$CAP" ]; then check battery_cap warn "no charge threshold control"
         elif [ "$CAP" -le 85 ]; then check battery_cap ok "${CAP}%"
         else check battery_cap fail "charges to ${CAP}% on constant AC"; fi
     fi
 
+    if [ "$VIRT" = none ] && compgen -G "/sys/class/net/wl*" >/dev/null; then
+        for dev in /sys/class/net/wl*; do
+            IF="${dev##*/}"
+            [ "$(cat "$dev/operstate" 2>/dev/null)" = up ] || continue
+            PS="$(iw dev "$IF" get power_save 2>/dev/null | awk '{print $3}' || true)"
+            if [ "$PS" = off ]; then check wifi_powersave ok "$IF: off"
+            elif [ "$PS" = on ]; then check wifi_powersave fail "$IF: power save is on; the link drops on idle"
+            else check wifi_powersave warn "$IF: cannot read power save (install iw)"; fi
+        done
+        systemctl is-active --quiet wifi-watchdog.timer 2>/dev/null && check wifi_watchdog ok "active" \
+            || check wifi_watchdog warn "no watchdog: a dropped Wi-Fi link stays down until someone notices"
+    fi
     grep -q zram /proc/swaps 2>/dev/null && check zram ok "$(awk '/zram/{printf "%d MiB", $3/1024}' /proc/swaps)" \
         || check zram warn "no zram swap: heavy builds swap to disk"
     MEM_MB="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
@@ -119,6 +127,7 @@ echo "Target user: ${TARGET_USER} (Home: ${TARGET_HOME})"
 AGENT_CHOICE="${AGENT:-none}"
 TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
 TAILSCALE_SSH=true
+WIFI_WATCHDOG=true
 POST_HOOK="${SERVERMAXXING_POST_HOOK:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -147,6 +156,10 @@ while [[ $# -gt 0 ]]; do
             POST_HOOK="${1#*=}"
             shift
             ;;
+        --no-wifi-watchdog)
+            WIFI_WATCHDOG=false
+            shift
+            ;;
         --no-tailscale-ssh)
             TAILSCALE_SSH=false
             shift
@@ -158,6 +171,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -a, --agent <claude|codex|herdr|tuios>  Auto-install and drop into agent session"
             echo "  -k, --tailscale-key, --tailscale-authkey <key> Join Tailscale mesh network unattended"
             echo "  --no-tailscale-ssh                      Disable Tailscale SSH flag (--ssh is enabled by default)"
+            echo "  --no-wifi-watchdog                      Do not install the Wi-Fi reconnect watchdog"
             echo "  --post-hook <command>                   Run a command as the target user after provisioning"
             echo "                                          (join a fleet, clone dotfiles...); also SERVERMAXXING_POST_HOOK"
             echo "  --audit [--json]                        Read-only check of this machine, no root needed; changes nothing"
@@ -243,15 +257,6 @@ LidSwitchIgnoreInhibited=no
 EOF
     systemctl kill -s HUP systemd-logind 2>/dev/null || true
 
-    # Disable Wi-Fi power saving (prevents high latency & SSH/Tailscale disconnects over Wi-Fi)
-    if [ -d /etc/NetworkManager/conf.d ]; then
-        cat << 'EOF' > /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf
-[connection]
-wifi.powersave = 2
-EOF
-        systemctl reload NetworkManager 2>/dev/null || true
-    fi
-
     # Battery Longevity Health Cap: set 80% charge threshold to avoid battery swelling under continuous AC power
     for bat_thresh in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
         if [ -w "$bat_thresh" ]; then
@@ -283,7 +288,8 @@ apt-get install -y --no-install-recommends \
     btop \
     htop \
     fastfetch \
-    zram-tools
+    zram-tools \
+    iw
 
 # Symlink fdfind -> fd for standard usage
 if command -v fdfind >/dev/null && ! command -v fd >/dev/null; then
@@ -363,6 +369,96 @@ PERCENT=50
 PRIORITY=100
 EOF
 systemctl restart zramswap.service 2>/dev/null || service zramswap restart 2>/dev/null || true
+
+# Wi-Fi keepalive (any physical machine with a wireless interface, laptop or not).
+# Power save drops the link on idle on many chips, and NetworkManager, wpa_supplicant or the driver
+# turn it back on at each reconnect, so set it off in every layer and keep a watchdog on it.
+if [ "$IS_VM" = false ] && compgen -G "/sys/class/net/wl*" > /dev/null; then
+    echo "Wireless interface found: disabling Wi-Fi power save and installing the keepalive..."
+    if [ -d /etc/NetworkManager/conf.d ]; then
+        cat << 'EOF' > /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf
+[connection]
+wifi.powersave = 2
+EOF
+        systemctl reload NetworkManager 2>/dev/null || true
+    fi
+    if [ -d /etc/networkd-dispatcher ]; then
+        for d in carrier.d routable.d; do
+            mkdir -p "/etc/networkd-dispatcher/$d"
+            cat << 'EOF' > "/etc/networkd-dispatcher/$d/50-wifi-powersave-off"
+#!/bin/sh
+# servermaxxing: turn Wi-Fi power save off whenever a wireless link comes up
+case "$IFACE" in wl*) iw dev "$IFACE" set power_save off 2>/dev/null || true ;; esac
+EOF
+            chmod 755 "/etc/networkd-dispatcher/$d/50-wifi-powersave-off"
+        done
+    fi
+    for dev in /sys/class/net/wl*; do iw dev "${dev##*/}" set power_save off 2>/dev/null || true; done
+    # Realtek rtw88 chips (RTL8723DE, RTL8822CE, ...) also drop links in deep power save and PCIe ASPM;
+    # takes effect at the next boot (reloading the driver now would cut the connection)
+    if lsmod 2>/dev/null | grep -q '^rtw88_core'; then
+        printf 'options rtw88_core disable_lps_deep=Y\noptions rtw88_pci disable_aspm=Y\n' > /etc/modprobe.d/rtw88-no-powersave.conf
+    fi
+    if [ "$WIFI_WATCHDOG" = true ]; then
+        cat << 'EOF' > /usr/local/sbin/wifi-watchdog
+#!/bin/bash
+# servermaxxing Wi-Fi watchdog: forces power save off, and when the default gateway stops answering
+# for 3 checks in a row, reconnects (networkctl/nmcli, then the WPA supplicant, then the network
+# service every 10 checks).
+set -u
+STATE=/run/wifi-watchdog; mkdir -p "$STATE"
+for dev in /sys/class/net/wl*; do
+    [ -e "$dev" ] || continue
+    IF="${dev##*/}"
+    [ "$(iw dev "$IF" get power_save 2>/dev/null | awk '{print $3}')" = on ] && \
+        iw dev "$IF" set power_save off && logger -t wifi-watchdog "$IF: power save was on; turned off"
+    GW="$(ip -4 route show default dev "$IF" 2>/dev/null | awk '{print $3; exit}')"
+    if [ -n "$GW" ] && ping -c 3 -W 2 -I "$IF" "$GW" >/dev/null 2>&1; then
+        echo 0 > "$STATE/$IF"; continue
+    fi
+    # No default route on Wi-Fi while another interface has one (Ethernet): nothing to fix
+    if [ -z "$GW" ] && ip -4 route show default | grep -q .; then echo 0 > "$STATE/$IF"; continue; fi
+    n=$(( $(cat "$STATE/$IF" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STATE/$IF"
+    if [ "$n" -eq 3 ]; then
+        logger -t wifi-watchdog "$IF: gateway ${GW:-none} unreachable 3 checks running; reconnecting"
+        if systemctl is-active --quiet NetworkManager; then nmcli device reapply "$IF" || nmcli device connect "$IF" || true
+        else networkctl reconfigure "$IF" || true; fi
+    elif [ "$n" -eq 6 ]; then
+        logger -t wifi-watchdog "$IF: still down; restarting the WPA supplicant"
+        systemctl restart "netplan-wpa-$IF.service" 2>/dev/null || systemctl restart wpa_supplicant.service || true
+    elif [ "$n" -ge 10 ] && [ $(( n % 10 )) -eq 0 ]; then
+        logger -t wifi-watchdog "$IF: down for $n checks; restarting networking"
+        if systemctl is-active --quiet NetworkManager; then systemctl restart NetworkManager || true
+        else netplan apply 2>/dev/null || systemctl restart systemd-networkd || true; fi
+    fi
+done
+EOF
+        chmod 755 /usr/local/sbin/wifi-watchdog
+        cat << 'EOF' > /etc/systemd/system/wifi-watchdog.service
+[Unit]
+Description=Keep Wi-Fi up (power save off, reconnect when the gateway stops answering)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wifi-watchdog
+EOF
+        cat << 'EOF' > /etc/systemd/system/wifi-watchdog.timer
+[Unit]
+Description=Run the Wi-Fi watchdog every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now wifi-watchdog.timer 2>/dev/null || true
+    fi
+fi
 
 # 5. Install Modern Language Runtimes: uv (Python) & Vite+ (Node.js & Bun)
 echo "[5/7] Installing Modern Language Runtimes (uv, Vite+, Node.js)..."
