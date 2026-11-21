@@ -1,0 +1,51 @@
+# shipkit.toml: one config for every shipkit skill, written from this repository by project.py.
+# Check the lines marked "guess", then delete these notes as you like.
+
+# What kind of project this is. Skills, checklists and kits run only the parts that fit it.
+# Each value is detected (sure), a guess to check, or set by hand. See `project.py --help`.
+[project]
+kind = "infra"                # saas|self-hosted|app|cli|library|infra|container-app (set)
+tenancy = "none"              # none|single-user|multi-user|multi-tenant (guess, check it)
+money = "none"                # none|payments (detected)
+plans = "none"                # none|tiers: priced plans (detected)
+auth = "none"                 # none|local|accounts (guess, check it)
+surfaces = ["shell"]          # api, web, native, cli, shell, container, library
+offline = false               # works offline and syncs later
+
+# Where the code is, so the stack skills look in the right place ("" or [] when there is none).
+[stack]
+api_dir = ""
+web_dirs = []
+native_dir = ""
+
+# docsync: the documentation contract.
+[docsync]
+docs_dir = "docs"
+packages = []           # each keeps its own CHANGELOG.md; [] for a one-package repo
+tracker = "docs/feature_status.md"
+features_dir = "docs/features"
+code_roots = []
+bug_register = "docs/testing/bug_report.md"
+attack_log = "docs/testing/attack_log.md"
+naming = "snake"                   # snake | kebab | lower | any
+
+[open_loops]
+register = "docs/open_questions.md"
+
+# feature-map: the map of features; no priced plans, so no tiers.
+[feature_map]
+catalog = "docs/feature_catalog.md"
+tiers = []
+
+# ship-check: its checklist keeps only the items this profile needs (`requires`).
+[ship_check]
+checklist = "ship-check.toml"
+
+[handoff]
+file = "HANDOFF.md"
+owner = "the owner"
+timezone = "UTC"
+
+[triage]
+repo_url = ""                       # default: the origin remote
+timezone = "UTC"
