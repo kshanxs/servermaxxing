@@ -12,6 +12,7 @@ if [[ " $* " == *" --audit "* ]]; then
     AUDIT_ROWS=()
     check() { AUDIT_ROWS+=("$1"$'\t'"$2"$'\t'"$3"); }
     have() { command -v "$1" >/dev/null 2>&1; }
+    PATH="$HOME/.local/bin:$PATH"  # user-level tools (--user-tools) count, even in a non-login shell
 
     VIRT="$(systemd-detect-virt 2>/dev/null || true)"; VIRT="${VIRT:-none}"
     LAPTOP=false
@@ -114,6 +115,35 @@ if [[ " $* " == *" --audit "* ]]; then
     exit 0
 fi
 
+# ------------------------------------------------------------------
+# User-level tools: `bash servermaxxing.sh --user-tools [--dry-run]`
+# No root, nothing outside the user's home. For appliances and machines you do not administer.
+# ------------------------------------------------------------------
+if [[ " $* " == *" --user-tools "* ]]; then
+    PATH="$HOME/.local/bin:$PATH"
+    DRY=false
+    [[ " $* " == *" --dry-run "* ]] && DRY=true
+    if command -v uv >/dev/null 2>&1; then
+        echo "uv: already installed"
+    elif [ "$DRY" = true ]; then
+        echo "would install uv and uvx into $HOME/.local/bin"
+    else
+        command -v curl >/dev/null 2>&1 || { echo "servermaxxing: curl is required for --user-tools" >&2; exit 1; }
+        UV_TMP="$(mktemp -d)"
+        trap 'rm -rf "$UV_TMP"' EXIT
+        curl -fsSL https://astral.sh/uv/install.sh -o "$UV_TMP/install.sh"
+        UV_INSTALL_DIR="$HOME/.local/bin" sh "$UV_TMP/install.sh"
+    fi
+    if command -v shellcheck >/dev/null 2>&1; then
+        echo "shellcheck: already installed"
+    elif [ "$DRY" = true ]; then
+        echo "would install shellcheck with uv"
+    else
+        uv tool install --quiet shellcheck-py
+    fi
+    exit 0
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 
 echo "======================================================"
@@ -129,6 +159,7 @@ TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY:-}"
 TAILSCALE_SSH=true
 WIFI_WATCHDOG=true
 POST_HOOK="${SERVERMAXXING_POST_HOOK:-}"
+DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -164,6 +195,10 @@ while [[ $# -gt 0 ]]; do
             TAILSCALE_SSH=false
             shift
             ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: sudo bash servermaxxing.sh [options]"
             echo ""
@@ -175,15 +210,51 @@ while [[ $# -gt 0 ]]; do
             echo "  --post-hook <command>                   Run a command as the target user after provisioning"
             echo "                                          (join a fleet, clone dotfiles...); also SERVERMAXXING_POST_HOOK"
             echo "  --audit [--json]                        Read-only check of this machine, no root needed; changes nothing"
+            echo "  --user-tools [--dry-run]                Install uv and shellcheck in your home, no root (for appliances)"
+            echo "  --dry-run                               Check that this machine can be provisioned; changes nothing"
             echo "  GH_TOKEN=<token> (env)                  Log target user into GitHub unattended (also reads GITHUB_TOKEN)"
             echo "  -h, --help                              Show this help message"
             exit 0
             ;;
         *)
-            shift
+            echo "servermaxxing: unknown option: $1 (see --help); nothing was changed" >&2
+            exit 2
             ;;
     esac
 done
+
+# Stop here, before any change, on a machine this script must not provision.
+OS_RELEASE="${SERVERMAXXING_OS_RELEASE:-/etc/os-release}"
+OS_TEXT="$(tr '[:upper:]' '[:lower:]' < "$OS_RELEASE" 2>/dev/null || true)"
+if [ "$(uname -s)" != "Linux" ]; then
+    echo "servermaxxing: provisioning supports Linux only; this is $(uname -s). Nothing was changed." >&2
+    exit 1
+fi
+# Several appliances report plain Debian in os-release, so their own files are checked too.
+SYSROOT="${SERVERMAXXING_SYSROOT:-}"
+APPLIANCE=false
+for marker in /opt/umbreld /usr/local/bin/umbreld /etc/synoinfo.conf /etc/unraid-version /usr/bin/midclt /usr/sbin/hassio-supervisor; do
+    [ -e "$SYSROOT$marker" ] && APPLIANCE=true
+done
+if [ "$APPLIANCE" = true ] || [[ "$OS_TEXT" =~ umbrel|truenas|unraid|synology|home[[:space:]_-]?assistant|haos ]]; then
+    echo "servermaxxing: this is an appliance OS, which manages its own packages and services. Nothing was changed." >&2
+    echo "Use --audit to check it and --user-tools to add tools to your home." >&2
+    exit 1
+fi
+if ! command -v apt-get >/dev/null 2>&1; then
+    FOUND="$(for m in dnf yum pacman zypper apk; do command -v "$m" >/dev/null 2>&1 && echo "$m" && break; done || true)"
+    echo "servermaxxing: provisioning needs apt (Debian or Ubuntu); found ${FOUND:-no known package manager}. Nothing was changed." >&2
+    echo "Use --audit to check this machine and --user-tools to add tools to your home." >&2
+    exit 1
+fi
+if [ "$DRY_RUN" = true ]; then
+    echo "Dry run: this machine can be provisioned for ${TARGET_USER}. Nothing was changed."
+    exit 0
+fi
+if [ "$(id -u)" -ne 0 ]; then
+    echo "servermaxxing: provisioning needs root: sudo bash servermaxxing.sh. Nothing was changed." >&2
+    exit 1
+fi
 
 if [ "$AGENT_CHOICE" != "none" ]; then
     echo "Selected Agent Auto-Launch: ${AGENT_CHOICE}"

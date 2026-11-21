@@ -1,4 +1,4 @@
-# 🧰 Tool Guide: Which Tool for Which Job
+# Tool Guide: Which Tool for Which Job
 
 `servermaxxing.sh` installs a lot of tools on the agent box. This guide maps everyday jobs to the tool that does them best, for both you and your AI agents.
 
