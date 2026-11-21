@@ -122,6 +122,10 @@ echo "15. Git identity:" "$(git config --global user.name 2>/dev/null || echo 'M
 
 ### Appliances: audit, never provision
 
+The provisioner needs apt (Debian or Ubuntu), stops before any change on anything else, and rejects
+unknown flags. `--dry-run` checks a machine; `--user-tools` adds uv and shellcheck to the home folder
+without root.
+
 On an appliance OS (umbrelOS, TrueNAS, Unraid, Synology DSM, Home Assistant OS, a managed
 container host) run `--audit` only. Do not run the provisioner there: it removes snaps, masks
 services, installs packages and writes sudoers, which those systems manage themselves. Fix gaps the

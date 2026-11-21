@@ -120,6 +120,14 @@ bash /tmp/smx.sh --audit          # ok / warn / fail per check
 bash /tmp/smx.sh --audit --json   # [{"check", "status", "detail"}] for scripts and fleet tools
 ```
 Safe on appliances (umbrelOS, TrueNAS, Synology...) where you should audit but not provision.
+The provisioner refuses appliances and non-apt systems before changing anything.
+
+```bash
+bash /tmp/smx.sh --dry-run                # can this machine be provisioned? changes nothing
+bash /tmp/smx.sh --user-tools             # no root: uv and shellcheck in your home
+```
+
+**Supported:** provisioning on Debian and Ubuntu; audit on Linux.
 
 ### 5. Hand Off to Your Own Setup (fleets, dotfiles)
 ```bash
@@ -191,7 +199,7 @@ Looking to build a homelab cluster or optimize a specific virtualization stack? 
 
 - 📖 **[Ubuntu Server Setup Guide](docs/setup.md)** — Complete step-by-step walkthrough covering manual setups, Wi-Fi powersave tweaks, and tool configurations.
 - 🖥️ **[Proxmox VE Setup Guide](docs/proxmox.md)** — Optimized LXC containers with Docker nesting and Tailscale TUN pass-through, plus GPU passthrough for local models.
-- 🌐 **[Multi-Node LAN Deployment](docs/multi-node-deployment.md)** — Decouple heavy agent compute from production database nodes across local gigabit LAN.
+- 🌐 **[Multi-Node LAN Deployment](docs/multi_node_deployment.md)** — Decouple heavy agent compute from production database nodes across local gigabit LAN.
 - 🧰 **[Tool Guide: Which Tool for Which Job](docs/tools.md)** — "I want to…" lookup table, tools grouped by job, and common workflows.
 
 ---
