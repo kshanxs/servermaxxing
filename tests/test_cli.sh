@@ -46,4 +46,12 @@ if [ "$(id -u)" -ne 0 ]; then
     expect "a normal user is refused" 1 "needs root" "$T/apt:$BASE" "$T/ubuntu"
 fi
 expect "user tools dry run" 0 "would install uv" "$T/apt:$BASE" "$T/ubuntu" --user-tools --dry-run
+# Under set -e an assignment takes the exit status of its command substitution, so
+# VAR="$([ cond ] && echo x)" ends the whole script when cond is false. Each such test needs "|| ...".
+BAD="$(grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*="[^"]*\$\([[:space:]]*\[[^)]*\][[:space:]]*&&[^)|]*\)' "$SCRIPT" | grep -v '||' || true)"
+if [ -n "$BAD" ]; then
+    echo "FAIL a false test inside an assignment would end the script under set -e:"; echo "$BAD"; FAILS=$((FAILS + 1))
+else
+    echo "ok   no assignment ends the script on a false test"
+fi
 [ "$FAILS" = 0 ] && echo "all passed" || { echo "$FAILS failed"; exit 1; }
