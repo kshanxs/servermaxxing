@@ -685,7 +685,7 @@ if id "$TARGET_USER" &>/dev/null && command -v git >/dev/null 2>&1; then
         # Preferred: HTTPS via gh credential helper; drop any SSH rewrite left by an earlier run
         as_target 'gh auth setup-git --hostname github.com' || true
         as_target 'git config --global --unset-all url.git@github.com:.insteadof "^https://github.com/$"' 2>/dev/null || true
-        GIT_AUTH_STATE="HTTPS via gh credential helper$([ "$SSH_OK" = true ] && echo ', SSH also OK')"
+        GIT_AUTH_STATE="HTTPS via gh credential helper$([ "$SSH_OK" = true ] && echo ', SSH also OK' || true)"
     elif [ "$SSH_OK" = true ]; then
         # No gh login but SSH key works: transparently route https://github.com/ URLs over SSH
         as_target 'git config --global --replace-all url.git@github.com:.insteadof https://github.com/ "^https://github.com/$"'
