@@ -82,6 +82,12 @@ bash servermaxxing.sh --audit --json   # the same as a JSON array of {check, sta
 curl -fsSL https://raw.githubusercontent.com/kshanxs/servermaxxing/main/scripts/servermaxxing.sh -o /tmp/smx.sh && bash /tmp/smx.sh --audit
 ```
 
+Besides readiness, the audit reports hygiene, each with the fix in its detail and never acting
+on it: `docker_reclaim` (reclaimable images, volumes and build cache), `docker_stopped` (old
+exited containers outside compose), `mem_pressure`, `journal` and `caches`. Thresholds come from
+`SMX_*` environment variables (the README lists them). Run the suggested command only after
+checking what it removes.
+
 It checks the host kind, sleep masking, lid policy, Wi-Fi power save and battery cap (laptops),
 zram, memory, disk, passwordless sudo, Docker, Tailscale (CLI or a `tailscale0` interface, for
 Tailscale running in a container), the runtimes and tools, GitHub CLI login, git auth over HTTPS or

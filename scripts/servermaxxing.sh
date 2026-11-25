@@ -94,6 +94,105 @@ if [[ " $* " == *" --audit "* ]]; then
     GN="$(git config --global user.name 2>/dev/null || true)"; GE="$(git config --global user.email 2>/dev/null || true)"
     [ -n "$GN" ] && [ -n "$GE" ] && check git_identity ok "set" || check git_identity warn "user.name or user.email missing"
 
+    # Hygiene: what has piled up, with the command that clears it. Thresholds come from SMX_* variables.
+    # Each row only reports and suggests; nothing here removes or stops anything.
+    gb() { awk -v b="$1" 'BEGIN{printf "%.1f GB", b/1e9}'; }
+    ge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a >= b)}'; }  # ge <a> <b>: a >= b, decimals allowed
+    to_bytes() {  # 1.2GB, 300MB, 1.5G, 200.0M, 512kB, 0B -> bytes (docker is decimal, journalctl binary)
+        awk -v s="$1" -v base="$2" 'BEGIN{
+            if (!match(s, /^[0-9.]+/)) { print 0; exit }
+            n = substr(s, 1, RLENGTH); u = toupper(substr(s, RLENGTH + 1)); sub(/I?B$/, "", u)
+            p = index("KMGTP", substr(u, 1, 1)); printf "%.0f", n * (u == "" ? 1 : base ^ p)}'
+    }
+    DOCKER_UP=false
+    have docker && docker info >/dev/null 2>&1 && DOCKER_UP=true
+    if [ "$DOCKER_UP" = true ]; then
+        WARN_GB="${SMX_DOCKER_RECLAIM_WARN_GB:-5}"; FAIL_GB="${SMX_DOCKER_RECLAIM_FAIL_GB:-20}"
+        FREE_PCT="${SMX_DOCKER_RECLAIM_FAIL_FREE_PCT:-25}"
+        RECLAIM=0
+        while IFS=$'\t' read -r type size; do
+            case "$type" in Images|"Local Volumes"|"Build Cache")
+                RECLAIM="$(awk -v a="$RECLAIM" -v b="$(to_bytes "${size%% *}" 1000)" 'BEGIN{printf "%.0f", a + b}')" ;;
+            esac
+        done < <(docker system df --format '{{.Type}}'$'\t''{{.Reclaimable}}' 2>/dev/null || true)
+        ROOTDIR="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+        FREE_KB="$(df -Pk "${ROOTDIR:-/}" 2>/dev/null | awk 'NR==2{print $4}' || true)"
+        FREE_B="$(awk -v k="${FREE_KB:-0}" 'BEGIN{printf "%.0f", k * 1024}')"
+        SHARE="$(awk -v r="$RECLAIM" -v f="$FREE_B" 'BEGIN{printf "%.0f", (f > 0 ? r * 100 / f : 0)}')"
+        FIX="review with docker system df -v, then docker image prune -a and docker builder prune (volumes only after checking: docker volume prune)"
+        if ! ge "$RECLAIM" "$(awk -v g="$WARN_GB" 'BEGIN{print g * 1e9}')"; then
+            check docker_reclaim ok "$(gb "$RECLAIM") reclaimable in images, volumes and build cache"
+        elif ge "$RECLAIM" "$(awk -v g="$FAIL_GB" 'BEGIN{print g * 1e9}')" || { [ "$FREE_B" -gt 0 ] && ge "$SHARE" "$FREE_PCT"; }; then
+            check docker_reclaim fail "$(gb "$RECLAIM") reclaimable (${SHARE}% of free disk); $FIX"
+        else
+            check docker_reclaim warn "$(gb "$RECLAIM") reclaimable (${SHARE}% of free disk); $FIX"
+        fi
+
+        DAYS="${SMX_DOCKER_STOPPED_DAYS:-7}"
+        CUTOFF="$(( $(date +%s) - ${DAYS%.*} * 86400 ))"
+        OLD=()
+        mapfile -t IDS < <(docker ps -a --filter status=exited -q 2>/dev/null || true)
+        if [ "${#IDS[@]}" -gt 0 ]; then
+            while IFS='|' read -r name finished project; do
+                [ -n "$name" ] && [ -z "$project" ] || continue
+                ended="$(date -d "$finished" +%s 2>/dev/null || echo "$CUTOFF")"
+                [ "$ended" -lt "$CUTOFF" ] && OLD+=("${name#/}")
+            done < <(docker inspect --format '{{.Name}}|{{.State.FinishedAt}}|{{index .Config.Labels "com.docker.compose.project"}}' "${IDS[@]}" 2>/dev/null || true)
+        fi
+        if [ "${#OLD[@]}" -eq 0 ]; then check docker_stopped ok "no exited containers older than ${DAYS}d outside compose"
+        else check docker_stopped warn "${#OLD[@]} exited over ${DAYS}d ago with no compose label; check, then docker rm ${OLD[*]}"; fi
+    else
+        check docker_reclaim n/a "docker not reachable"
+        check docker_stopped n/a "docker not reachable"
+    fi
+
+    MEMINFO="${SERVERMAXXING_SYSROOT:-}/proc/meminfo"
+    if [ -r "$MEMINFO" ]; then
+        read -r M_TOTAL M_AVAIL S_TOTAL S_FREE < <(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^SwapTotal:/{st=$2} /^SwapFree:/{sf=$2}
+            END{print t+0, a+0, st+0, sf+0}' "$MEMINFO")
+        AVAIL_PCT=$(( M_TOTAL > 0 ? M_AVAIL * 100 / M_TOTAL : 100 ))
+        SWAP_PCT=$(( S_TOTAL > 0 ? (S_TOTAL - S_FREE) * 100 / S_TOTAL : 0 ))
+        MEM_DETAIL="MemAvailable ${AVAIL_PCT}% of $(gb $(( M_TOTAL * 1024 ))), swap ${SWAP_PCT}% used"
+        MEM_FIX="find the biggest with ps -eo pid,rss,comm --sort=-rss | head"
+        if ! ge "$AVAIL_PCT" "${SMX_MEM_FAIL_PCT:-5}"; then
+            check mem_pressure fail "$MEM_DETAIL; $MEM_FIX"
+        elif ! ge "$AVAIL_PCT" "${SMX_MEM_WARN_PCT:-15}" || ! ge "${SMX_SWAP_WARN_PCT:-50}" "$SWAP_PCT"; then
+            check mem_pressure warn "$MEM_DETAIL; $MEM_FIX"
+        else check mem_pressure ok "$MEM_DETAIL"; fi
+    else check mem_pressure n/a "cannot read $MEMINFO"; fi
+
+    if have journalctl; then
+        J_SIZE="$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[BKMGTP]' | head -1 || true)"
+        J_BYTES="$(to_bytes "${J_SIZE:-0B}" 1024)"
+        if ge "$J_BYTES" "$(awk -v g="${SMX_JOURNAL_WARN_GB:-1}" 'BEGIN{print g * 1e9}')"; then
+            check journal warn "$(gb "$J_BYTES") of journal; sudo journalctl --vacuum-size=500M, and set SystemMaxUse= in journald.conf"
+        else check journal ok "$(gb "$J_BYTES") of journal"; fi
+    else check journal n/a "no journalctl"; fi
+
+    CACHE_KB=0; CACHE_PARTS=(); CACHE_PARTIAL=""; TILDE='~'  # shown as ~/.npm, never expanded
+    CACHE_DIRS=()
+    for dir in .npm .cache .bun .cargo .rustup; do [ -d "$HOME/$dir" ] && CACHE_DIRS+=("$dir"); done
+    if [ "${#CACHE_DIRS[@]}" -gt 0 ]; then
+        DU_OUT="$(mktemp -d)"
+        for dir in "${CACHE_DIRS[@]}"; do  # in parallel, each capped, so a cold disk cannot stall the audit
+            if have timeout; then (timeout "${SMX_CACHES_TIMEOUT:-5}" du -sk "$HOME/$dir" > "$DU_OUT/$dir" 2>/dev/null || true) &
+            else (du -sk "$HOME/$dir" > "$DU_OUT/$dir" 2>/dev/null || true) & fi
+        done
+        wait
+        for dir in "${CACHE_DIRS[@]}"; do
+            KB="$(awk 'NR==1{print $1}' "$DU_OUT/$dir" 2>/dev/null || true)"
+            [ -n "$KB" ] || { CACHE_PARTIAL=" (not measured in time: $TILDE/$dir)"; continue; }
+            CACHE_KB=$(( CACHE_KB + KB ))
+            CACHE_PARTS+=("$TILDE/$dir $(gb $(( KB * 1024 )))")
+        done
+        rm -rf "${DU_OUT:?}"
+    fi
+    CACHE_LIST="$(IFS=,; echo "${CACHE_PARTS[*]:-}")"
+    CACHE_DETAIL="$(gb $(( CACHE_KB * 1024 ))) in caches${CACHE_LIST:+: }${CACHE_LIST//,/, }$CACHE_PARTIAL"
+    if ge $(( CACHE_KB * 1024 )) "$(awk -v g="${SMX_CACHES_WARN_GB:-5}" 'BEGIN{print g * 1e9}')"; then
+        check caches warn "$CACHE_DETAIL; npm cache clean --force, uv cache prune, review ~/.cache, rustup toolchain list for old toolchains"
+    else check caches ok "$CACHE_DETAIL"; fi
+
     if [ "$AUDIT_JSON" = true ]; then
         esc() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//$'\t'/ }"; }
         printf '['

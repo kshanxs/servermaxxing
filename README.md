@@ -120,6 +120,19 @@ bash /tmp/smx.sh --audit          # ok / warn / fail per check
 bash /tmp/smx.sh --audit --json   # [{"check", "status", "detail"}] for scripts and fleet tools
 ```
 Safe on appliances (umbrelOS, TrueNAS, Synology...) where you should audit but not provision.
+
+The audit also reports what has piled up, with the command that clears it in the detail. It only
+reports: it never removes, prunes or stops anything. Thresholds come from environment variables:
+
+| Check | warn | fail | Variables |
+|---|---|---|---|
+| `docker_reclaim` | 5 GB reclaimable in images, volumes and build cache | 20 GB, or 25% of the free disk | `SMX_DOCKER_RECLAIM_WARN_GB`, `SMX_DOCKER_RECLAIM_FAIL_GB`, `SMX_DOCKER_RECLAIM_FAIL_FREE_PCT` |
+| `docker_stopped` | exited over 7 days ago, with no compose label | – | `SMX_DOCKER_STOPPED_DAYS` |
+| `mem_pressure` | MemAvailable under 15%, or swap over 50% used | MemAvailable under 5% | `SMX_MEM_WARN_PCT`, `SMX_MEM_FAIL_PCT`, `SMX_SWAP_WARN_PCT` |
+| `journal` | `journalctl --disk-usage` over 1 GB | – | `SMX_JOURNAL_WARN_GB` |
+| `caches` | `~/.npm`, `~/.cache`, `~/.bun`, `~/.cargo` and `~/.rustup` over 5 GB together | – | `SMX_CACHES_WARN_GB`, `SMX_CACHES_TIMEOUT` (seconds to measure, default 5) |
+
+A row is `n/a` when its source cannot be read (docker not reachable as this user, no journalctl).
 The provisioner refuses appliances and non-apt systems before changing anything.
 
 ```bash
