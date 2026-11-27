@@ -59,6 +59,21 @@ if [[ " $* " == *" --audit "* ]]; then
             if [ "$PS" = off ]; then check wifi_powersave ok "$IF: off"
             elif [ "$PS" = on ]; then check wifi_powersave fail "$IF: power save is on; the link drops on idle"
             elif have iw; then check wifi_powersave warn "$IF: iw could not read power save"
+            elif have nmcli && NMCON="$(nmcli -g GENERAL.CONNECTION device show "$IF" 2>/dev/null)" && [ -n "$NMCON" ]; then
+                # No iw (an appliance, say), but NetworkManager runs the link: read the setting it applies.
+                NMPS="$(nmcli -g 802-11-wireless.powersave connection show "$NMCON" 2>/dev/null || true)"
+                NMFIX="nmcli connection modify '$NMCON' 802-11-wireless.powersave 2, then reconnect"
+                case "$NMPS" in
+                    disable|2) check wifi_powersave ok "$IF: off (NetworkManager setting)" ;;
+                    enable|3) check wifi_powersave fail "$IF: power save is on (NetworkManager); the link drops on idle: $NMFIX" ;;
+                    *)
+                        NMGLOBAL="$(NetworkManager --print-config 2>/dev/null | sed -n 's/^wifi\.powersave *= *//p' | tail -1 || true)"
+                        case "$NMGLOBAL" in
+                            2) check wifi_powersave ok "$IF: off (NetworkManager default)" ;;
+                            3) check wifi_powersave fail "$IF: power save is on (NetworkManager default); the link drops on idle: $NMFIX" ;;
+                            *) check wifi_powersave warn "$IF: NetworkManager leaves power save to the driver, usually on: $NMFIX" ;;
+                        esac ;;
+                esac
             else check wifi_powersave warn "$IF: cannot read power save; iw is not installed (install iw)"; fi
         done
         systemctl is-active --quiet wifi-watchdog.timer 2>/dev/null && check wifi_watchdog ok "active" \
