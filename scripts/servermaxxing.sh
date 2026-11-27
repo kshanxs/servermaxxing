@@ -13,11 +13,18 @@ if [[ " $* " == *" --audit "* ]]; then
     check() { AUDIT_ROWS+=("$1"$'\t'"$2"$'\t'"$3"); }
     have() { command -v "$1" >/dev/null 2>&1; }
     PATH="$HOME/.local/bin:$PATH"  # user-level tools (--user-tools) count, even in a non-login shell
+    # SERVERMAXXING_SYSROOT prefixes the files the audit reads (tests point it at a fixture tree).
+    SYSFS="${SERVERMAXXING_SYSROOT:-}/sys"
+    # iw, ip and friends live in sbin, which a service's or cron's PATH often leaves out.
+    for dir in /usr/local/sbin /usr/sbin /sbin; do
+        dir="${SERVERMAXXING_SYSROOT:-}$dir"
+        [[ ":$PATH:" == *":$dir:"* ]] || PATH="$PATH:$dir"
+    done
 
     VIRT="$(systemd-detect-virt 2>/dev/null || true)"; VIRT="${VIRT:-none}"
     LAPTOP=false
-    CHASSIS="$(tr -d '[:space:]' < /sys/class/dmi/id/chassis_type 2>/dev/null || true)"
-    if [ "$VIRT" = none ] && { compgen -G "/sys/class/power_supply/BAT*" >/dev/null || [[ "$CHASSIS" =~ ^(8|9|10|11|14|30|31|32)$ ]]; }; then
+    CHASSIS="$(tr -d '[:space:]' < "$SYSFS/class/dmi/id/chassis_type" 2>/dev/null || true)"
+    if [ "$VIRT" = none ] && { compgen -G "$SYSFS/class/power_supply/BAT*" >/dev/null || [[ "$CHASSIS" =~ ^(8|9|10|11|14|30|31|32)$ ]]; }; then
         LAPTOP=true
     fi
     KIND="$([ "$VIRT" != none ] && echo "vm:$VIRT" || ([ "$LAPTOP" = true ] && echo laptop || echo bare-metal))"
@@ -36,20 +43,23 @@ if [[ " $* " == *" --audit "* ]]; then
         if [ "$LID" = "HandleLidSwitch=ignore" ]; then check lid ok "lid close ignored"
         elif [ "$SLEEP" = masked ]; then check lid warn "lid close still asks to suspend (blocked only because sleep is masked)"
         else check lid fail "closing the lid suspends the machine"; fi
-        CAP="$(cat /sys/class/power_supply/BAT*/charge_control_end_threshold 2>/dev/null | head -1 || true)"
-        if [ -z "$CAP" ]; then check battery_cap warn "no charge threshold control"
+        CAP="$(cat "$SYSFS"/class/power_supply/BAT*/charge_control_end_threshold 2>/dev/null | head -1 || true)"
+        # No threshold attribute means the battery or its driver cannot cap charging: nothing to fix here.
+        if ! compgen -G "$SYSFS/class/power_supply/BAT*" >/dev/null; then check battery_cap n/a "no battery"
+        elif [ -z "$CAP" ]; then check battery_cap n/a "charge threshold not supported by this battery; keep it unplugged near 80% or use a smart plug"
         elif [ "$CAP" -le 85 ]; then check battery_cap ok "${CAP}%"
         else check battery_cap fail "charges to ${CAP}% on constant AC"; fi
     fi
 
-    if [ "$VIRT" = none ] && compgen -G "/sys/class/net/wl*" >/dev/null; then
-        for dev in /sys/class/net/wl*; do
+    if [ "$VIRT" = none ] && compgen -G "$SYSFS/class/net/wl*" >/dev/null; then
+        for dev in "$SYSFS"/class/net/wl*; do
             IF="${dev##*/}"
             [ "$(cat "$dev/operstate" 2>/dev/null)" = up ] || continue
             PS="$(iw dev "$IF" get power_save 2>/dev/null | awk '{print $3}' || true)"
             if [ "$PS" = off ]; then check wifi_powersave ok "$IF: off"
             elif [ "$PS" = on ]; then check wifi_powersave fail "$IF: power save is on; the link drops on idle"
-            else check wifi_powersave warn "$IF: cannot read power save (install iw)"; fi
+            elif have iw; then check wifi_powersave warn "$IF: iw could not read power save"
+            else check wifi_powersave warn "$IF: cannot read power save; iw is not installed (install iw)"; fi
         done
         systemctl is-active --quiet wifi-watchdog.timer 2>/dev/null && check wifi_watchdog ok "active" \
             || check wifi_watchdog warn "no watchdog: a dropped Wi-Fi link stays down until someone notices"
@@ -109,10 +119,28 @@ if [[ " $* " == *" --audit "* ]]; then
     if [ "$DOCKER_UP" = true ]; then
         WARN_GB="${SMX_DOCKER_RECLAIM_WARN_GB:-5}"; FAIL_GB="${SMX_DOCKER_RECLAIM_FAIL_GB:-20}"
         FREE_PCT="${SMX_DOCKER_RECLAIM_FAIL_FREE_PCT:-25}"
-        RECLAIM=0
+        RECLAIM=0; IMG_BYTES=""; IMG_NOTE=""
+        # With the containerd image store, df's image RECLAIMABLE counts layers other images still
+        # use, far above what removing unused images frees. Sum the unique size of images no
+        # container uses instead: from -v --format, else from the -v table (last two columns).
+        if [[ "$(docker info --format '{{range .DriverStatus}}{{index . 1}} {{end}}' 2>/dev/null || true)" == *io.containerd.snapshotter* ]]; then
+            if UNUSED="$(docker system df -v --format '{{range .Images}}{{.Containers}} {{.UniqueSize}}{{println}}{{end}}' 2>/dev/null)" \
+                || UNUSED="$(docker system df -v 2>/dev/null | awk '/^Images space usage/{on=1; next}
+                    on && /^REPOSITORY/{hdr=1; next} hdr && NF==0{exit} hdr{print $NF, $(NF-1)} END{exit !hdr}')"; then
+                IMG_BYTES=0
+                while read -r used size; do
+                    [ "$used" = 0 ] && IMG_BYTES="$(awk -v a="$IMG_BYTES" -v b="$(to_bytes "$size" 1000)" 'BEGIN{printf "%.0f", a + b}')"
+                done <<< "$UNUSED"
+                IMG_NOTE=" (images: unique size of unused images, containerd store)"
+            else
+                IMG_NOTE=" (images figure is an upper bound with the containerd store)"
+            fi
+        fi
         while IFS=$'\t' read -r type size; do
             case "$type" in Images|"Local Volumes"|"Build Cache")
-                RECLAIM="$(awk -v a="$RECLAIM" -v b="$(to_bytes "${size%% *}" 1000)" 'BEGIN{printf "%.0f", a + b}')" ;;
+                bytes="$(to_bytes "${size%% *}" 1000)"
+                [ "$type" = Images ] && [ -n "$IMG_BYTES" ] && bytes="$IMG_BYTES"
+                RECLAIM="$(awk -v a="$RECLAIM" -v b="$bytes" 'BEGIN{printf "%.0f", a + b}')" ;;
             esac
         done < <(docker system df --format '{{.Type}}'$'\t''{{.Reclaimable}}' 2>/dev/null || true)
         ROOTDIR="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
@@ -121,11 +149,11 @@ if [[ " $* " == *" --audit "* ]]; then
         SHARE="$(awk -v r="$RECLAIM" -v f="$FREE_B" 'BEGIN{printf "%.0f", (f > 0 ? r * 100 / f : 0)}')"
         FIX="review with docker system df -v, then docker image prune -a and docker builder prune (volumes only after checking: docker volume prune)"
         if ! ge "$RECLAIM" "$(awk -v g="$WARN_GB" 'BEGIN{print g * 1e9}')"; then
-            check docker_reclaim ok "$(gb "$RECLAIM") reclaimable in images, volumes and build cache"
+            check docker_reclaim ok "$(gb "$RECLAIM") reclaimable in images, volumes and build cache$IMG_NOTE"
         elif ge "$RECLAIM" "$(awk -v g="$FAIL_GB" 'BEGIN{print g * 1e9}')" || { [ "$FREE_B" -gt 0 ] && ge "$SHARE" "$FREE_PCT"; }; then
-            check docker_reclaim fail "$(gb "$RECLAIM") reclaimable (${SHARE}% of free disk); $FIX"
+            check docker_reclaim fail "$(gb "$RECLAIM") reclaimable (${SHARE}% of free disk)$IMG_NOTE; $FIX"
         else
-            check docker_reclaim warn "$(gb "$RECLAIM") reclaimable (${SHARE}% of free disk); $FIX"
+            check docker_reclaim warn "$(gb "$RECLAIM") reclaimable (${SHARE}% of free disk)$IMG_NOTE; $FIX"
         fi
 
         DAYS="${SMX_DOCKER_STOPPED_DAYS:-7}"
