@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The --audit hygiene rows (docker_reclaim, docker_stopped, mem_pressure, journal, caches) against
-# stubbed docker and journalctl, a fixture /proc/meminfo and a throwaway HOME. The audit must stay
+# The --audit hygiene rows (docker_reclaim, docker_stopped, mem_pressure, journal, caches) and the
+# laptop rows (battery_cap, wifi_powersave) against stubbed docker, journalctl and iw, a fixture
+# sysroot (/proc/meminfo, /sys, the sbin directories) and a throwaway HOME. The audit must stay
 # valid JSON and must never remove, prune or stop anything.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,9 +23,13 @@ cat > "$T/stub/docker" <<STUB
 echo "docker \$*" >> "$T/calls"
 [ -e "$T/fx/docker_down" ] && exit 1
 case "\$1" in
-  info) case "\$*" in *DockerRootDir*) echo "$T" ;; *) echo ok ;; esac ;;
+  info) case "\$*" in *DockerRootDir*) echo "$T" ;; *DriverStatus*) cat "$T/fx/driver" 2>/dev/null ;; *) echo ok ;; esac ;;
   --version) echo "Docker version 99.0.0, build stub" ;;
-  system) cat "$T/fx/df" ;;
+  system) case "\$*" in
+      *-v*--format*) [ -e "$T/fx/dfv_lines" ] && cat "$T/fx/dfv_lines" || exit 1 ;;
+      *-v*) [ -e "$T/fx/dfv_table" ] && cat "$T/fx/dfv_table" || exit 1 ;;
+      *) cat "$T/fx/df" ;;
+    esac ;;
   ps) cat "$T/fx/exited" ;;
   inspect) cat "$T/fx/inspect" ;;
   *) exit 1 ;;
@@ -138,6 +143,64 @@ expect "SMX_JOURNAL_WARN_GB lowers the journal threshold" journal warn
 exited old-job 10
 audit SMX_DOCKER_STOPPED_DAYS=30
 expect "SMX_DOCKER_STOPPED_DAYS widens the age" docker_stopped ok
+
+# The containerd image store: df's image figure counts layers other images still use, so the
+# audit sums the unique size of images no container uses (here 0.8 GB, not 4.9 GB).
+scene "4.889GB (85%)" "1GB" "600MB" "100M"
+echo "io.containerd.snapshotter.v1" > "$T/fx/driver"
+printf '1 173.4MB\n0 173.3MB\n0 115.9MB\n0 351.7MB\n0 178.4MB\n1 1.697GB\n0 12.18MB\n' > "$T/fx/dfv_lines"
+audit
+expect "containerd store: images count by unused unique size" docker_reclaim ok "2.4 GB"
+expect "containerd store: the detail says how images were counted" docker_reclaim ok "unique size"
+untouched "the containerd audit changes nothing"
+rm "$T/fx/dfv_lines"
+cat > "$T/fx/dfv_table" <<'TABLE'
+Images space usage:
+
+REPOSITORY   TAG       IMAGE ID       CREATED        SIZE      SHARED SIZE   UNIQUE SIZE   CONTAINERS
+app          v2        fd49f56bfcfb   17 hours ago   306MB     132.9MB       173.4MB       1
+app          v1        e64b3e9814f3   22 hours ago   306MB     132.9MB       173.3MB       0
+<none>       <none>    9fdeeda2801c   2 weeks ago    352MB     0B            351.7MB       0
+
+Containers space usage:
+
+CONTAINER ID   IMAGE     COMMAND   LOCAL VOLUMES   SIZE      CREATED       STATUS    NAMES
+abc            app:v2    "run"     0               0B        2 days ago    Up        app
+TABLE
+audit
+expect "containerd store without -v --format: the table is read" docker_reclaim ok "2.1 GB"
+rm "$T/fx/dfv_table"
+audit
+expect "containerd store with no per-image data: an upper bound" docker_reclaim warn "upper bound"
+rm "$T/fx/driver"
+audit
+expect "the classic store keeps df's image figure" docker_reclaim warn "6.5 GB"
+
+# Laptop rows read the fixture /sys; no systemd-detect-virt on PATH means bare metal.
+PS_DIR="$T/sys/sys/class/power_supply/BAT0"
+mkdir -p "$PS_DIR"
+audit
+expect "a battery without a threshold attribute is n/a, not a warning" battery_cap n/a "not supported"
+echo 80 > "$PS_DIR/charge_control_end_threshold"
+audit
+expect "an 80% cap is ok" battery_cap ok "80%"
+echo 100 > "$PS_DIR/charge_control_end_threshold"
+audit
+expect "a 100% cap on AC still fails" battery_cap fail "100%"
+
+# iw lives in sbin, which a service's PATH often leaves out: the audit must still find it.
+mkdir -p "$T/sys/sys/class/net/wlan0" "$T/sys/usr/sbin"
+echo up > "$T/sys/sys/class/net/wlan0/operstate"
+audit
+expect "no iw anywhere says to install it" wifi_powersave warn "install iw"
+printf '#!/bin/sh\necho "iw $*" >> "%s/calls"\necho "Power save: off"\n' "$T" > "$T/sys/usr/sbin/iw"
+chmod +x "$T/sys/usr/sbin/iw"
+audit
+expect "iw only in sbin, sbin not on PATH, is still found" wifi_powersave ok "wlan0: off"
+printf '#!/bin/sh\nexit 1\n' > "$T/sys/usr/sbin/iw"
+audit
+expect "iw present but failing does not say install iw" wifi_powersave warn "iw could not read"
+row wifi_powersave | grep -q "install iw" && { echo "FAIL a failing iw still says install iw"; FAILS=$((FAILS + 1)); } || echo "ok   a failing iw is not reported as missing"
 
 # No docker daemon, no journalctl, no meminfo: n/a, and still valid JSON.
 touch "$T/fx/docker_down"

@@ -132,7 +132,12 @@ reports: it never removes, prunes or stops anything. Thresholds come from enviro
 | `journal` | `journalctl --disk-usage` over 1 GB | – | `SMX_JOURNAL_WARN_GB` |
 | `caches` | `~/.npm`, `~/.cache`, `~/.bun`, `~/.cargo` and `~/.rustup` over 5 GB together | – | `SMX_CACHES_WARN_GB`, `SMX_CACHES_TIMEOUT` (seconds to measure, default 5) |
 
-A row is `n/a` when its source cannot be read (docker not reachable as this user, no journalctl).
+A row is `n/a` when its source cannot be read (docker not reachable as this user, no journalctl) or
+it cannot apply to the hardware (`battery_cap` on a battery without a charge threshold attribute).
+Only `warn` and `fail` are problems. With Docker's containerd image store, `docker_reclaim` counts
+images by the unique size of images no container uses, since `docker system df` overstates it there.
+The audit also looks in `/usr/local/sbin`, `/usr/sbin` and `/sbin` for tools such as `iw`, so it reads
+the same from a service or cron job whose `PATH` leaves them out.
 The provisioner refuses appliances and non-apt systems before changing anything.
 
 ```bash
