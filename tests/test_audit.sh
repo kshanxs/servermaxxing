@@ -202,6 +202,36 @@ audit
 expect "iw present but failing does not say install iw" wifi_powersave warn "iw could not read"
 row wifi_powersave | grep -q "install iw" && { echo "FAIL a failing iw still says install iw"; FAILS=$((FAILS + 1)); } || echo "ok   a failing iw is not reported as missing"
 
+# No iw, but NetworkManager: read its power save setting instead of telling an appliance to install iw.
+rm "$T/sys/usr/sbin/iw"
+cat > "$T/stub/nmcli" <<STUB
+#!/bin/sh
+echo "nmcli \$*" >> "$T/calls"
+case "\$*" in
+    "-g GENERAL.CONNECTION device show wlan0") echo "Home Wi-Fi" ;;
+    "-g 802-11-wireless.powersave connection show Home Wi-Fi") cat "$T/fx/nm_ps" ;;
+esac
+STUB
+printf '#!/bin/sh\n[ "$1" = --print-config ] && cat "%s/fx/nm_conf"\n' "$T" > "$T/stub/NetworkManager"
+chmod +x "$T/stub/nmcli" "$T/stub/NetworkManager"
+printf '[connection]\n# wifi.powersave=3\n' > "$T/fx/nm_conf"
+echo disable > "$T/fx/nm_ps"
+audit
+expect "NetworkManager power save disabled is ok" wifi_powersave ok "off (NetworkManager"
+echo enable > "$T/fx/nm_ps"
+audit
+expect "NetworkManager power save enabled fails with the nmcli fix" wifi_powersave fail "802-11-wireless.powersave 2"
+echo default > "$T/fx/nm_ps"
+audit
+expect "default with no global setting is the driver's choice: warn with the nmcli fix" wifi_powersave warn "nmcli connection modify"
+row wifi_powersave | grep -q "install iw" && { echo "FAIL nmcli present still says install iw"; FAILS=$((FAILS + 1)); } || echo "ok   nmcli present does not say install iw"
+printf '[connection]\nwifi.powersave=2\n' > "$T/fx/nm_conf"
+audit
+expect "default with a global wifi.powersave=2 is ok" wifi_powersave ok "off (NetworkManager"
+untouched "reading NetworkManager changes nothing"
+grep -q "modify" "$T/calls" && { echo "FAIL the audit ran nmcli modify"; FAILS=$((FAILS + 1)); } || echo "ok   the audit never runs nmcli modify"
+rm "$T/stub/nmcli" "$T/stub/NetworkManager"
+
 # No docker daemon, no journalctl, no meminfo: n/a, and still valid JSON.
 touch "$T/fx/docker_down"
 rm "$T/stub/journalctl" "$T/sys/proc/meminfo"

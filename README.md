@@ -138,6 +138,9 @@ Only `warn` and `fail` are problems. With Docker's containerd image store, `dock
 images by the unique size of images no container uses, since `docker system df` overstates it there.
 The audit also looks in `/usr/local/sbin`, `/usr/sbin` and `/sbin` for tools such as `iw`, so it reads
 the same from a service or cron job whose `PATH` leaves them out.
+Without `iw` (an appliance that cannot install packages, say), `wifi_powersave` reads the power save
+setting NetworkManager applies (the connection's `802-11-wireless.powersave`, else `wifi.powersave` in
+its configuration) and gives the `nmcli` command that turns it off.
 The provisioner refuses appliances and non-apt systems before changing anything.
 
 ```bash
